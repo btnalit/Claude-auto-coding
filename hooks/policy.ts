@@ -18,11 +18,14 @@ const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
 const GRAPHQL = /\bgh\b.*\bgraphql\b/
 const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
+const YARN_BUMP = /^--(major|minor|patch|premajor|preminor|prepatch|prerelease|new-version)(=|$)/
 
-const PUBLISHERS: Record<string, (words: string[]) => boolean> = {
+/** `words` are the arguments that are not flags; `args` all of them. */
+const PUBLISHERS: Record<string, (words: string[], args: string[]) => boolean> = {
   npm: w => w.includes('publish') || isVersionBump(w) || (w[0] === 'dist-tag' && w[1] === 'add'),
   pnpm: w => w.includes('publish') || isVersionBump(w),
-  yarn: w => w.includes('publish') || isVersionBump(w),
+  // yarn v1 takes the new version as a flag: `yarn version --patch`, `--new-version=2.0.0`.
+  yarn: (w, args) => w.includes('publish') || isVersionBump(w) || (w[0] === 'version' && args.some(a => YARN_BUMP.test(a))),
   bun: w => w.includes('publish'),
   cargo: w => w.includes('publish'),
   poetry: w => w.includes('publish'),
@@ -133,7 +136,7 @@ function checkSegment(tokens: string[], context: BoundaryContext, command: strin
   if (program === 'git') return checkGit(args, context)
   if (program === 'gh') return checkGh(args, context, command)
   const words = args.filter(a => !a.startsWith('-'))
-  return PUBLISHERS[program]?.(words) === true ? `发布制品（${program} ${words.join(' ')}）` : undefined
+  return PUBLISHERS[program]?.(words, args) === true ?`发布制品（${program} ${words.join(' ')}）` : undefined
 }
 
 function gitSubcommand(args: string[]): { sub: string; rest: string[] } | undefined {
