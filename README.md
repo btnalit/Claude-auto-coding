@@ -165,7 +165,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 
 **放行**：推功能分支（含 `--force-with-lease`）、`gh pr create/view/checks`、在功能分支上 merge/rebase main、在 main 上 `git pull`，以及一切本地开发操作（编辑、测试、提交）。
 
-**它是词法的、尽力而为的**：按命令文本判断，引号内的 `sh -c '…'`、管道、`&&`、heredoc 喂给 shell、PowerShell here-string 交给 `Invoke-Expression`/`iex`/`pwsh`、`gh api graphql` 的 heredoc 正文都会被读到；提交信息、`--body`、喂给 `cat` 的 heredoc 被当作数据，不会误伤。但脚本文件里的命令、别名、变量拼接、`gh workflow run` 触发的发版流水线都在它视野之外。**真正的保证应放在系统边界上**：GitHub 分支保护（main 要求 PR + review）、发布凭据（npm token 等）不进 Worker 的环境。mod 的边界是第二道防线和审计点，每次拦截都记入日志并作为证据交给 Reviewer。
+**它是词法的、尽力而为的**：按命令文本判断，引号内的 `sh -c '…'`、管道、`&&`、heredoc 喂给 shell、PowerShell here-string 交给 `Invoke-Expression`/`iex`/`pwsh`、`gh api graphql` 的 heredoc 正文都会被读到；提交信息、`--body`、喂给 `cat` 的 heredoc 被当作数据，不会误伤。但脚本文件里的命令、别名、变量拼接、`gh api graphql --input <文件>` 的正文、`gh workflow run` 触发的发版流水线都在它视野之外。**MCP 工具不在边界内**：只有 Bash 和 PowerShell 两个工具过 policy，会话若接了 GitHub 类 MCP 服务，它的合并 PR、写分支、发版工具不经过这道检查。**真正的保证应放在系统边界上**：GitHub 分支保护（main 要求 PR + review）、发布凭据（npm token 等）不进 Worker 的环境。mod 的边界是第二道防线和审计点，每次拦截都记入日志并作为证据交给 Reviewer。
 
 `.git` 写入、删除底线这些本地防护不由 mod 拦截，交给 Claude Code 自己的权限模式。
 
@@ -197,8 +197,8 @@ claude plugin validate D:\Claude-auto-coding   # manifest、hooks、state 契约
 claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 ```
 
-- `tests/policy.test.ts`：边界放行/拒绝两侧 65 条用例
-- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
+- `tests/policy.test.ts`：边界放行/拒绝两侧 79 条用例
+- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、残留的回合标记在 session.start / session.end / 底层 turn.complete 失败后被清掉、有回合在途时 start 等它结束、步骤仍在运行时 resume 不重跑、暂停期间结束的回合计数并更新最后回复、验收中按 Esc（prepend 层插件抢先结束派发）进入 paused 而非修复轮、非 ASCII 及读不到的未跟踪文件仍列给 Reviewer、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
 已在真实引擎（2.1.289，Windows）实测：

@@ -4,12 +4,13 @@
 - 基线：`bee6555`（分支 `worktree-self-review-2`）
 - 方法：通读源码 → 对照本机引擎类型（2.1.289 `claude-code.d.ts`：`update` 为 ifVersion CAS 重试、`turn.start` 只由主循环触发、`$.prompt.submit` 排队到空闲才开轮、重载丢弃定时器）→ 用临时探针测试和回归测试实证 → 修复确定性的 P0/P1 → 其余只记录
 - 行号：均指本次提交后的文件；已修复项另注基线行号
+- 第二轮（P2 处理，任务 T261004160108）：基线 `5fd5296`，分支 `worktree-fix-p2`。P2 条目原有的「位置」仍指第一轮的文件；每条新增「状态」，已修的写明提交号和修复后的位置。独立 Review 补充的一条记为 P2-11。P3 本轮不处理。
 
 | 级别 | 数量 | 处理 |
 | --- | --- | --- |
 | P0 | 0 | — |
 | P1 | 5 | 已修复并补测试 |
-| P2 | 10 | 记录，未改 |
+| P2 | 11 | 9 条已修并补回归测试；P2-7 部分修复（heredoc 已修，`--input <文件>` 不修）；P2-5 不修（README 写明边界） |
 | P3 | 17 | 记录，未改 |
 
 分级口径：P0 = 数据破坏/安全边界整体失效；P1 = 核心路径上可确定复现的错误行为，或 README §5/§7 明确声称而实现做不到；P2 = 有实际影响但需特定条件、或属于词法边界的覆盖缺口；P3 = 体验、文档、极端输入。
@@ -68,7 +69,7 @@
 
 ---
 
-## P2（未修复）
+## P2（第二轮已处理）
 
 ### register.tsx
 
@@ -77,34 +78,49 @@
 - 问题：`isStuck` 只看状态是 `deciding/verifying/reviewing`，无法区分「重载后真的卡住」和「步骤正在本环境里跑」。
 - 影响：验收中 `resume` 会在同一 worktree 并行再跑一遍检查（端口、锁文件、构建目录冲突 → 假失败），Review 中 `resume` 会再调一次 Reviewer。seq 守卫会丢掉旧结果，不会写坏状态，但浪费且可能制造假失败。
 - 建议：模块级 `let inFlight: number | undefined` 记录本环境正在执行步骤的 seq（重载自然清零，正好就是「卡住」的信号），`resume` 只在没有在途步骤时重跑。
+- **状态：已修（`ee63d25`）**。模块级计数 `stepsInFlight`（`hooks/register.tsx:355-364`），`turn.complete` 里的步骤链、重载后的重跑、`resume` 触发的步骤都经 `inFlight()` 计数；`resume` 遇到 `deciding/verifying/reviewing` 且本环境有在途步骤时回复「这一步仍在运行，无需恢复」（`:125`）。测试「a resume while a step still runs here does not run it a second time」：决策 fork 被挂起时 resume → 只有 1 次 fork、1 次 `git diff --check`，最终完成。遗留：已暂停任务的旧步骤仍在收尾时（验收中暂停后立刻恢复），新步骤会立即开始，旧步骤的检查进程跑完后按 seq 丢弃结果——与修复前相同，未扩大处理范围。
 
 **P2-2 暂停期间结束的 Worker 回合不计数，`lastAnswer` 过期**
 - 位置：`hooks/register.tsx:149`（非 running/publishing 直接返回）、`hooks/logic.ts:100`、`hooks/logic.ts:174`
 - 问题：回合在 `paused` 时结束（P1-1 修复覆盖的是「回合还没结束就恢复」，这里是「结束后才恢复」），`turns` 不加、`lastAnswer` 停在上一轮。
 - 影响：决策提示里的「Worker's last reply」和 Reviewer 证据里的「Worker's final report」是上一轮的话；反复暂停可绕过 `maxTurns`。
 - 建议：暂停时的主循环回合只记录 `lastAnswer`（不改状态、不 bump 语义）；是否计入轮次属于口径问题，需要定：用户自己接管的回合算不算 Worker 回合。
+- **状态：已修（`0e64dd7`）**。`notePausedTurn`（`hooks/register.tsx:389-408`）：暂停期间结束的主循环回合 `turns + 1`，以 `answer` 结束时写入 `lastAnswer`，状态不变；不递增 `seq`（不是迁移），已在路上的 resume 照常生效；面板日志不写（面板只在任务进行中动），审计日志记 `turn_while_paused`。**口径决定**：任务期间主循环结束的每一轮都计入 `turns`，包括暂停期间你自己发起的回合——引擎的 `turn.complete` 不说明回合由谁发起，预算是这个会话回合数的上限；README §4 的 `maxTurns` 说明随之更新。测试「a turn that ends while paused counts, and its reply is what the decision reads」。
 
 **P2-3 验收中按 Esc 可能被当成检查失败、消耗修复轮**
 - 位置：`hooks/register.tsx:426-432`
 - 问题：`runChecks` 把 `$.process.run` 的任何 rejection 都记成 `exitCode -1` 的失败，随后 `repair()` 发出新的 Worker 回合。README §7 说「在验收 / Review 中按 Esc … 进入 paused」。类型文档只写了 `process.run`「无法启动或超时时 reject」，没说派发被放弃时的行为——**未实测，属推断**。
 - 建议：把 `turn.complete` 的 `next.signal` 传到 `runChecks`，`signal.aborted` 时转 `paused` 而不是 repair；先在真实引擎里验证 Esc 时 `process.run` 的行为。
+- **状态：已修（`0061a86`）**。`next.signal` 经 `onWorkerTurn → decide → verify` 传入；检查返回时若信号已中止，任务转 `paused`（「验收被中断；/supervise resume 重新验收」），本次检查结果不记录、不进修复轮（`hooks/register.tsx:461-471`）。不论 `process.run` 在真实引擎里被放弃时是 reject 还是照常跑完，都不会再排修复轮——后一种情况修复前同样会在检查失败时排一轮新 Worker 回合。测试「Esc during the checks pauses the task instead of sending a repair turn」：prepend 层的内联插件在检查挂起时抢先结束 `turn.complete` 派发（探针确认这会让下层 hook 的 `next.signal` 中止，被挂起的 `process.run` 仍正常返回）；修复前任务进入修复轮，修复后为已暂停且只提交过 1 条 prompt。未在真实引擎里按 Esc 实测。
 
 **P2-4 非 ASCII 文件名的未跟踪文件对 Reviewer 静默消失**
 - 位置：`hooks/register.tsx:461`、`:474-479`，`hooks/logic.ts:179-184`
 - 问题：`git status --porcelain` 默认 `core.quotePath=true`，`说明.md` 输出为 `?? "\350\257\264\346\230\216.md"`（已实测）。`untrackedPaths` 只去掉外层引号，`$.fs.read` 失败后 `continue`，该文件既不展示也不列名。
 - 影响：中文文件名的新文件若未提交，Reviewer 完全不知道它存在。Worker 被要求提交，所以多数情况下文件会进 diff，影响面有限。
 - 建议：`git -c core.quotePath=false status --porcelain -z`，按 NUL 切分；读取失败时也把路径列进「未展示」段。
+- **状态：已修（`1eac0d7`）**。改用 `git status --porcelain -z --untracked-files=all`（`-z` 本身就不转义路径，不需要 `core.quotePath`），`untrackedPaths`（`hooks/logic.ts:197-212`）按 NUL 切分并跳过改名/复制条目的源路径字段（已用真实 git 核对：`R  b.txt\0a.txt\0?? 说明.md\0`）；读不到的文件列进「Untracked files that could not be read」段（`hooks/register.tsx:547`、`:560`）。测试「the reviewer is told of every untracked file, whatever its name, even one it cannot read」。
 
 **P2-5 硬边界只覆盖 Bash/PowerShell 工具**
 - 位置：`hooks/register.tsx:176`
 - 问题：匹配器只有 `/^(Bash|PowerShell)$/`。会话若接了 GitHub 类 MCP 服务（本机就有 GitHub 连接器），其 merge / release 工具完全在边界之外。
 - 影响：设计边界而非实现错误；README §5 只说「Bash 和 PowerShell 两个工具」，但「监督任务期间禁止合并与发版」的总述会让人以为是全局的。
 - 建议：对 `mcp__*` 工具按名字拒绝 `merge|release|publish|tag` 类操作，或在 README §5 明确写出 MCP 不在边界内。
+- **状态：不修**——各 MCP 服务的工具名和参数没有统一约定，按名字猜既会误拦只读工具（`list_releases`、`get_tag`），又拦不住按参数写受保护分支的工具（`push_files` 的 `branch: main`），只会制造虚假的覆盖感；真正的保证在系统边界（分支保护、发布凭据不进 Worker 环境）。改为在 README §5 明确写出「MCP 工具不在边界内」。
 
 **P2-10 Worker 回合进行中 stop 后立即 start：新任务接到旧任务的回合**
 - 位置：`hooks/register.tsx:603-608`（`start` 只拒绝 active 的旧任务）
 - 问题：`/supervise stop` 明说「正在运行的这一轮不会被打断」，任务变 `stopped` 后 `start` 立即放行。旧回合结束时新任务处于 `running`，`turn.complete` 把它算作新任务的第 1 轮：`lastAnswer` 是旧任务的回复，决策若为 `continue` 会在已排队的启动 prompt 后面再排一条——与 P1-1 同形的双驱动，入口不同。
 - 建议：`start` 读 `auto-coding.workerTurn`，非空时回复「等这一轮结束再启动」。这会改变 `start` 的契约，本次只记录。
+- **状态：已修（`08f2e40`，与 P2-11 同一提交）**。按建议改了 `start` 的契约：有回合在途时拒绝，回复「会话里还有一轮在进行（/supervise stop 不会打断它）。等这一轮结束后再 /supervise start。」（`hooks/register.tsx:682-685`）。这个拒绝依赖标记不会残留，所以与 P2-11 一起修。`-p` 与 `scripts/auto.ps1` 的 start 是会话第一条输入，不受影响。测试「a start waits for the stopped task's turn instead of taking it as its own」：stop 后立即 start 被拒、没有提交新 prompt；旧回合结束后 start 成功，新任务 `轮次 0/40`。
+
+**P2-11 `workerTurn` 残留：恢复时等一个永远不来的 `turn.complete`**（独立 Review 补充）
+- 位置：`hooks/register.tsx:139-149`（基线 `5fd5296`：`turn.start` 写入、主循环 `turn.complete` 在 `await next(e)` 之后才清除、从不比对 turn id）
+- 问题：标记只有一个清除点，且排在 `next(e)` 之后。某轮的结束没有走到那一行（底层 `turn.complete` 失败、会话在回合中途结束而状态留存、重载）时，标记一直留着。
+- 影响：从 `paused` 恢复时 `resumeStep` 看到标记，只把任务改回 `running` 等这一轮结束，而这一轮已经不存在——任务挂在「Worker 工作中」，直到有人再发一条消息。P2-10 的修复让 `start` 读这个标记后，残留还会让新任务永远启动不了。
+- 修复：三个清除点（`hooks/register.tsx:85`、`:154`、`:232`）——`turn.complete` 在 `next(e)` **之前**清除（回合已结束，下层失败不影响）；`session.start` 在注册命令之前清除（它在第一条输入之前，或在回合结束时的重载里触发，此时不可能有回合在途）；`session.end` 清除（回合不会活过它的会话，`/clear` 之后也不会有 `session.start`）。没有采用「任务离开活动状态时清除」：`stop` 时旧回合仍在跑，清掉会让 P2-10 失效。没有在 `turn.complete` 比对 turn id：主循环串行，任一主循环回合结束时都不会有别的主循环回合在途，无条件清除同时清掉更早的残留。
+- 未覆盖：插件 worker 在回合中途重生（respawn）时 `session.start` 会清掉一个仍有效的标记，这一轮剩下的时间里 resume 会退回 P1-1 修复前的行为；概率低，且比残留导致的永久挂起代价小。
+- 测试：「a fresh session start drops a turn marker whose end never came」「a turn.complete that fails beneath the mod still ends the turn」「a session that ends mid-turn leaves no turn in flight for the next task」——三条在修复前 resume 都会等回合结束（返回「这一轮结束」），修复后直接决策并完成。
+- **状态：已修（`08f2e40`）**。
 
 ### policy.ts（词法边界的覆盖缺口，均已用探针实证）
 
@@ -112,21 +128,25 @@
 - 位置：`hooks/policy.ts:73`
 - 问题：所有 `@'…'@` / `@"…"@` 一律当数据删除。`@'\ngit push origin main\n'@ | Invoke-Expression` 放行。Windows 上 PowerShell 是唯一 shell 工具，这条比 bash heredoc 更相关。
 - 建议：here-string 同一行在 `'@` 之后管道给 `iex|Invoke-Expression|pwsh|powershell`，或作为它们的参数时保留正文。
+- **状态：已修（`ed18c8f`）**。`stripData`（`hooks/policy.ts:76-82`）看 here-string 开头那一行 `@'` 之前和结尾那一行 `'@` 之后的文字，有 shell 或 `iex`/`Invoke-Expression` 就保留正文；`SHELLS` 加入这两个名字。测试拒绝 `@'…'@ | Invoke-Expression`、`Invoke-Expression @"…"@`、`@'…'@ | iex`；放行 `git commit -m @'…'@`、`@'…'@ | Set-Content notes.md`。变量中转（`$s = @'…'@; iex $s`）仍在词法视野之外。
 
 **P2-7 `gh api graphql` 的正文来自 heredoc 或文件时不可见**
 - 位置：`hooks/policy.ts:79-81`、`:217`
 - 问题：`gh api graphql -F query=@- <<EOF … EOF` 的正文不是喂给 shell，按数据删除；`--input file.json` 读不到。
 - 建议：heredoc 行含 `gh api graphql` 时保留正文参与 mutation 匹配；`--input` 视为不可判定，可选择保守拒绝。
+- **状态：部分修复（`ed18c8f`）**。heredoc：所在行是 `gh … graphql` 时保留正文（`hooks/policy.ts:91`），`checkGh` 对整条命令的 mutation 名匹配就能看到它；测试拒绝 `gh api graphql -F query=@- <<'EOF'` + `mergePullRequest` 正文，放行同样写法的只读 `query { … mergeable }`。`--input <文件>` **不修**：文件内容与脚本文件同属词法边界之外（README §5 已写明），保守拒绝会误拦只读查询。
 
 **P2-8 `yarn version --patch|--minor|--major` 放行**
 - 位置：`hooks/policy.ts:102-104`、`:22-24`
 - 问题：`isVersionBump` 只数非 `-` 开头的词；yarn v1 的版本号是以旗标给出的，默认还会打 git tag。
 - 建议：`--patch/--minor/--major/--prerelease/--new-version` 也算版本提升。
+- **状态：已修（`c057e36`）**。发布判定函数同时拿到原始参数，yarn 在 `version` 子命令带 `--major|minor|patch|premajor|preminor|prepatch|prerelease|new-version` 时视为版本提升（`hooks/policy.ts:22`、`:29`）。测试拒绝 `yarn version --patch`、`yarn version --new-version=2.0.0`，放行 `npm version --json`。
 
 **P2-9 `git rebase --onto <newbase> <upstream> <branch>` 改写受保护分支放行**
 - 位置：`hooks/policy.ts:143-146`
 - 问题：`--onto` 的取值被当成位置参数，`words[1]` 实际是 upstream 而不是被改写的分支；`git rebase --onto feat/login x main` 放行。
 - 建议：跳过 `--onto` 的取值后再取被改写分支。
+- **状态：已修（`41380cc`）**。跳过 `--onto`、`-s/--strategy`、`-X/--strategy-option`、`-x/--exec` 的取值后，剩下的才是 `<upstream> [<branch>]`（`hooks/policy.ts:18`、`:166-169`）。同一个解析错误还让 `git rebase -X theirs main feat/login` 被误判为改写 main，一并消除。测试拒绝 `git rebase --onto feat/login x main`、`git rebase -s ort feat/base master`；放行 `git rebase --onto main feat/base feat/login`、`git rebase -X theirs main feat/login`。
 
 ---
 
@@ -173,3 +193,13 @@
 | `claude plugin validate .` | 通过；state 读写含 `auto-coding.workerTurn` |
 | `npx -p typescript tsc -p .` | 通过 |
 | `git diff --check` | 无输出 |
+| **第二轮（P2）** | |
+| `claude plugin test .`（基线 `5fd5296`） | 81 pass |
+| 每条新增回归用例在对应修复前运行 | 均失败（P2-1：resume 回复「决策步骤先读一遍…」；P2-2：`轮次 0/40`；P2-3：进入修复轮；P2-4：Reviewer 提示里没有 `说明.md`；P2-6/7/8/9：放行；P2-10：start 成功；P2-11：三条 resume 都在等回合结束） |
+| 测试工具探针（已删除） | prepend 层插件抢先结束 `turn.complete` → 下层 hook 的 `next.signal.aborted === true`，挂起的 `process.run` 仍正常返回；测试引擎里 `$.command.register` 无实现会 reject（故 `session.start` 先清标记再注册） |
+| `git status --porcelain -z --untracked-files=all`（含改名与 `说明.md`） | `R  b.txt\0a.txt\0?? 说明.md\0`（P2-4 解析前提成立） |
+| `claude plugin test .`（修复后） | 103 pass, 0 fail（policy 79 条，loop 24 条） |
+| `claude plugin validate .` | 通过 |
+| `npx -p typescript tsc -p .` | 通过 |
+| `git diff --check` | 无输出 |
+| 真实引擎 | 未实测（本会话的监督器加载的是 `%TEMP%` 快照，不随工作区改动热重载） |
