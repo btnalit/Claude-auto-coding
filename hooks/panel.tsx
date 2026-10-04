@@ -201,7 +201,7 @@ function Runs(el: ElementTable, runs: readonly Run[], key?: string) {
   return (
     <Text key={key} wrap="truncate-end">
       {runs.map((r, i) => (
-        <Text key={i} color={r.color} bold={r.isBold === true}>
+        <Text key={String(i)} color={r.color} bold={r.isBold === true}>
           {oneLine(r.text)}
         </Text>
       ))}
