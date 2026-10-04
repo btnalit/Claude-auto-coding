@@ -27,6 +27,7 @@ import {
   startPrompt,
   statusLine,
   supervisorObservations,
+  unattendedSection,
   tail,
   untrackedPaths,
 } from './logic'
@@ -161,6 +162,15 @@ export const register: Register = (on, options) => {
       $.ui.log(`auto-coding: ${errorText(error)}`)
     }
     return result
+  })
+
+  // While the task is working, the system prompt says what is pre-authorized and that "stop and ask"
+  // means "assume and go on"; a pause (a person typing) takes it away again.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const task = await read($, TASK)
+    if (task === null || !isWorking(task.status)) return composed
+    return { ...composed, sections: [...composed.sections, { id: 'auto-coding:unattended', text: unattendedSection(task), scope: 'session' }] }
   })
 
   on('prompt.submit', async ($, e, next) => {

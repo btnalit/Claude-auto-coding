@@ -331,3 +331,21 @@ test('a decision a pause overtook is never logged or acted on', async ($, on) =>
   expect(await ui.find({ type: 'Text', text: /检查/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('the system prompt carries the unattended rules only while the task is working', async ($, on) => {
+  const w = world(on)
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'engine', scope: 'shared' as const }] }))
+  const compose = async () =>
+    (
+      await $.prompt.compose({ model: 'opus', promptModel: 'opus', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
+    ).sections.find(s => s.id === 'auto-coding:unattended')
+
+  expect(await compose()).toBeUndefined()
+  await startTask($, w, 'start refactor')
+  const section = await compose()
+  expect(section?.scope).toBe('session')
+  expect(section?.text).toContain('已预先授权')
+  expect(section?.text).toContain('停下来问人')
+  await supervise($, 'pause')
+  expect(await compose()).toBeUndefined()
+})

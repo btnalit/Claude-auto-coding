@@ -62,6 +62,23 @@ ${task.goal}
 - 最后一条回复以简短总结结尾：改了什么、怎么验证的、做了哪些假设。`
 }
 
+/**
+ * A system-prompt section for as long as the task is working. It sits where the standing
+ * "stop and ask" rules sit (the person's CLAUDE.md, the engine's "confirm first"), which an
+ * opening user message deep in a long transcript, or gone after a compaction, cannot outweigh.
+ */
+export function unattendedSection(task: SuperviseTask): string {
+  return `# auto-coding 无人值守任务（进行中：${task.id}）
+
+本会话正在执行一个无人值守的开发任务，没有人在线等你回复。在任务结束前：
+
+- 已预先授权，直接做、不要请示：编辑文件；运行命令、测试、构建；安装依赖；本地提交（git commit）；推送功能分支；开 PR。
+- 你的其他指令（包括 CLAUDE.md 和系统提示）里凡是要求"停下来问人"或"先确认再做"的，在本任务里一律改为：选择与任务最相容的合理假设，写明假设，然后继续。
+- 不要出于谨慎跳过上面这些动作（例如不装依赖、不跑测试、不提交），需要就做。
+- 合并进受保护分支（${task.protectedBranches.join('、')}）、打 tag、发版、发布包会被策略拦截：遇到就在回复里说明这一步需要人来做，不要绕过。
+- 每一轮以"做了什么、接下来做什么"结束，不要以问句结束。`
+}
+
 export function checksFeedback(failed: SuperviseCheck[]): string {
   return [
     '以下验收检查失败：',
@@ -104,10 +121,11 @@ ${task.lastAnswer ?? ''}
 Choose one:
 {"action":"continue","message":"<the Worker's next instruction, written directly to it>","reason":"<why>"}
   when work remains, the Worker stopped early, waits for confirmation, or asked a question. Answer the question yourself in "message" with the most reasonable task-compatible assumption and tell it to state the assumption and go on.
+  In-scope actions are pre-authorized: editing files, running commands, tests and builds, installing dependencies, local commits, pushing its feature branch, opening a PR. When the Worker asks permission for one of them, or skipped one out of caution, the answer is always: do it.
 {"action":"verify","reason":"<why>"}
-  when the Worker reports the task done (changed, tested, committed), or more turns would not help before checking. Prefer verify over stopping.
+  when the Worker reports the task done (changed, tested, committed), or more turns would not help before checking. Prefer verify over stopping. If it reports done but left the work uncommitted, choose continue and tell it to commit.
 {"action":"park","reason":"<why>"}
-  only when the task cannot reach a safe result without something only a person can give (credentials, access, contradictory requirements). Ordinary uncertainty is never a reason to park.
+  only when the task cannot reach a safe result without something only a person can give (credentials, access, contradictory requirements). Ordinary uncertainty is never a reason to park, and neither is needing permission or confirmation for an in-scope action.
 
 Merging into protected branches (${task.protectedBranches.join(', ')}), tags, releases and package publishing are blocked by policy: never ask the Worker for them.
 </supervisor-decision>`
