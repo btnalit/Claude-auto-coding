@@ -110,7 +110,7 @@ export function wireCells(cells: number, frame?: number): string {
 
 export function barCells(fraction: number, width: number): { fill: string; rest: string } {
   const filled = Math.max(0, Math.min(width, Math.round(fraction * width)))
-  return { fill: '█'.repeat(filled), rest: '░'.repeat(width - filled) }
+  return { fill: '━'.repeat(filled), rest: '╌'.repeat(width - filled) }
 }
 
 /** live-panel's gauges flip colour past a threshold: here 75% of a budget, and red once it is spent. */
@@ -221,7 +221,9 @@ function Pipeline(el: ElementTable, model: PanelModel, width: number) {
               {i === active ? '▶ ' : v.tone === 'pending' ? '  ' : '· '}
               {padCells(v.name, 8)}
             </Text>
-            <Text color={v.tone === 'pending' ? TOKENS.dim : TOKENS.fg}>{v.sub}</Text>
+            <Text color={v.tone === 'pending' ? TOKENS.dim : TOKENS.fg} wrap="truncate-end">
+              {v.sub}
+            </Text>
           </Box>
         ))}
       </Box>
@@ -277,7 +279,7 @@ function Gauge(el: ElementTable, key: string, label: string, fraction: number, b
 
 function Budget(el: ElementTable, task: SuperviseTask | null, now: number, width: number) {
   const { Box, Text } = el
-  const barWidth = Math.max(8, Math.min(28, width - 30))
+  const barWidth = Math.max(8, Math.min(24, width - 34))
   const end = task?.endedAt ?? now
   const total = task === null ? 1 : task.deadlineAt - task.startedAt
   const used = task === null ? 0 : end - task.startedAt
@@ -425,9 +427,10 @@ export function drawPanel(el: ElementTable, model: PanelModel) {
   const { task } = model
   const width = Math.max(40, model.columns)
   const status = task === null ? 'IDLE' : `${isWorking(task.status) ? `${spinner(model.now)} ` : ''}${LABEL[task.status]}`
-  const logRows = Math.max(3, Math.min(8, model.rows - 28))
+  // The log streams, so it sits right under the pipeline and takes the rows the pane can spare.
+  const logRows = Math.max(4, Math.min(10, model.rows - 27))
   return (
-    <Box flexDirection="column" backgroundColor={TOKENS.bg} rowGap={1}>
+    <Box flexDirection="column" backgroundColor={TOKENS.bg}>
       <Box flexDirection="column" key="head">
         <Box justifyContent="center">
           {Runs(el, [
@@ -461,11 +464,13 @@ export function drawPanel(el: ElementTable, model: PanelModel) {
               { text: `分支 ${task.branch} · baseline ${task.baseline.slice(0, 7)} · reviewer ${task.reviewerModel} · 通过后 ${task.publish}`, color: TOKENS.dim },
             ])}
       </Box>
-      {Pipeline(el, model, width)}
-      {task?.note === undefined ? undefined : Runs(el, [{ text: `» ${task.note}`, color: STATUS_COLOR[task.status] }], 'note')}
+      <Box key="flow" flexDirection="column" marginY={1}>
+        {Pipeline(el, model, width)}
+        {task?.note === undefined ? undefined : Runs(el, [{ text: `» ${task.note}`, color: STATUS_COLOR[task.status] }], 'note')}
+      </Box>
+      {Log(el, model.events, logRows)}
       {Budget(el, task, model.now, width)}
       {Rail(el, model.denials)}
-      {Log(el, model.events, logRows)}
       {StatusBar(el, model)}
     </Box>
   )

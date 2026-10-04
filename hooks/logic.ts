@@ -37,7 +37,8 @@ export type Decision =
   | { action: 'verify' | 'park' | 'pause'; reason: string }
 
 export function statusLine(task: SuperviseTask): string {
-  return `auto-coding ${task.id} · ${LABEL[task.status]} · 轮次 ${task.turns}/${task.maxTurns} · 修复 ${task.repairRound}/${task.maxRepairRounds}`
+  // The engine leads a plugin's status line with the plugin's name.
+  return `${task.id} · ${LABEL[task.status]} · 轮次 ${task.turns}/${task.maxTurns} · 修复 ${task.repairRound}/${task.maxRepairRounds}`
 }
 
 export function hasBudget(task: SuperviseTask, now: number): boolean {
@@ -242,6 +243,11 @@ function balancedEnd(text: string, start: number): number {
     }
   }
   return -1
+}
+
+/** The start of `text`, for a row whose first words say what it is. */
+export function head(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`
 }
 
 export function tail(text: string, max: number): string {

@@ -17,6 +17,7 @@ import {
   diffSection,
   errorText,
   hasBudget,
+  head,
   isActive,
   isWorking,
   parseDecision,
@@ -265,7 +266,7 @@ async function patch($: Engine, task: SuperviseTask, change: Partial<SuperviseTa
 
 /** Adds a row to the panel's session log. */
 async function record($: Engine, who: SuperviseRole, text: string, tone?: SuperviseEvent['tone']): Promise<void> {
-  const event: SuperviseEvent = { at: await $.clock.now(), who, text: tail(text, 300) }
+  const event: SuperviseEvent = { at: await $.clock.now(), who, text: head(text, 300) }
   if (tone !== undefined) event.tone = tone
   await update($, EVENTS, list => [...list, event].slice(-MAX_EVENTS))
 }
@@ -366,14 +367,18 @@ async function decide($: Engine, task: SuperviseTask): Promise<void> {
   if (!hasBudget(task, now)) return verify($, task, '轮次或时间预算已用尽，做最终验收')
   const decision = await askDecision($, task, now)
   void log($, task, 'decision', decision)
-  await record($, 'decide', `${decision.action}：${decision.action === 'continue' ? decision.message : decision.reason}`, decision.action === 'park' ? 'warn' : undefined)
-  if (decision.action === 'continue') return send($, task, 'running', decision.message)
+  // The panel logs a decision once the transition it causes is written: a decision a
+  // pause, a stop or a reload overtook never shows. park and pause log as the task's own row.
+  if (decision.action === 'continue') {
+    if (await send($, task, 'running', decision.message)) await record($, 'decide', `continue：${decision.message}`)
+    return
+  }
   if (decision.action === 'park') return finish($, task, 'blocked', `决策挂起：${decision.reason}`)
   if (decision.action === 'pause') {
     await patch($, task, { status: 'paused', note: decision.reason })
     return
   }
-  return verify($, task, decision.reason === '' ? undefined : `准备验收：${decision.reason}`)
+  return verify($, task, decision.reason === '' ? undefined : `准备验收：${decision.reason}`, `verify：${decision.reason}`)
 }
 
 async function askDecision($: Engine, task: SuperviseTask, now: number): Promise<Decision> {
@@ -396,9 +401,10 @@ async function askDecision($: Engine, task: SuperviseTask, now: number): Promise
   return { action: 'verify', reason: '决策步骤没有给出有效动作，直接验收' }
 }
 
-async function verify($: Engine, task: SuperviseTask, note?: string): Promise<void> {
+async function verify($: Engine, task: SuperviseTask, note?: string, decided?: string): Promise<void> {
   const verifying = await patch($, task, { status: 'verifying', note })
   if (verifying === undefined) return
+  if (decided !== undefined) await record($, 'decide', decided)
   const checks = await runChecks($, verifying)
   void log($, verifying, 'checks', checks.map(({ id, command, isPassed, exitCode }) => ({ id, command, isPassed, exitCode })))
   const checked = await patch($, verifying, { lastChecks: checks })
@@ -440,7 +446,6 @@ async function review($: Engine, task: SuperviseTask): Promise<void> {
   const observed = supervisorObservations(reviewing, await read($, DENIALS))
   const result = await askReviewer($, reviewing, `${await collectEvidence($, reviewing)}\n\n${observed}`)
   void log($, reviewing, 'review', result)
-  if (!('error' in result)) await record($, 'review', `${result.verdict}：${result.summary}`, result.verdict === 'pass' ? 'ok' : 'warn')
   if ('error' in result && result.isInterrupted === true) {
     await patch($, reviewing, { status: 'paused', note: 'Review 被中断或超时；/supervise resume 重新验收' })
     return
@@ -448,6 +453,7 @@ async function review($: Engine, task: SuperviseTask): Promise<void> {
   if ('error' in result) return finish($, reviewing, 'blocked', `Reviewer 不可用：${result.error}`)
   const reviewed = await patch($, reviewing, { lastReview: result })
   if (reviewed === undefined) return
+  await record($, 'review', `${result.verdict}：${result.summary}`, result.verdict === 'pass' ? 'ok' : 'warn')
   if (result.verdict === 'revise') return repair($, reviewed, reviewFeedback(result), `Review 要求修改：${result.summary}`)
   if (result.verdict === 'human') return finish($, reviewed, 'blocked', `Review 需要人工判断：${result.summary}`)
   if (reviewed.publish === 'none') return finish($, reviewed, 'completed', `验收与独立 Review 通过：${result.summary}`)
@@ -531,7 +537,7 @@ async function repair($: Engine, task: SuperviseTask, feedback: string, reason: 
   if (repairing === undefined) return
   await record($, 'worker', `修复轮 ${round}/${task.maxRepairRounds}：${reason}`, 'warn')
   const text = `验收未通过，第 ${round}/${task.maxRepairRounds} 轮修复。\n\n${feedback}\n\n修复后重新运行相关检查并本地提交，最后简述改了什么、怎么验证的。`
-  return send($, repairing, 'running', text)
+  await send($, repairing, 'running', text)
 }
 
 async function startPublish($: Engine, task: SuperviseTask): Promise<void> {
@@ -541,7 +547,7 @@ async function startPublish($: Engine, task: SuperviseTask): Promise<void> {
     task.publish === 'pr'
       ? '把当前分支推到 origin，再用 gh pr create 开一个 PR（不要合并）。最后回复 PR 链接。'
       : '把当前分支推到 origin。最后回复推送的分支名。'
-  return send($, task, 'publishing', `验收检查和独立 Review 已通过。${newBranch}${action}`)
+  await send($, task, 'publishing', `验收检查和独立 Review 已通过。${newBranch}${action}`)
 }
 
 async function finishPublish($: Engine, task: SuperviseTask): Promise<void> {
@@ -564,14 +570,15 @@ async function finishPublish($: Engine, task: SuperviseTask): Promise<void> {
   return finish($, task, 'completed', `本地候选已通过验收；发布未核实（${missing}）`)
 }
 
-/** Moves the task to `status` and hands the Worker its next instruction as a turn of its own. */
-async function send($: Engine, task: SuperviseTask, status: 'running' | 'publishing', text: string): Promise<void> {
+/** Moves the task to `status` and queues the Worker's next turn; false when the step was overtaken. */
+async function send($: Engine, task: SuperviseTask, status: 'running' | 'publishing', text: string): Promise<boolean> {
   const sent = await patch($, task, { status })
-  if (sent === undefined) return
+  if (sent === undefined) return false
   void log($, sent, 'worker_input', { text: tail(text, 2000) })
   $.prompt.submit({ text: `[auto-coding ${sent.id}] ${text}` }).catch(error => {
     detach($, finish($, sent, 'failed', `无法向 Worker 提交下一轮：${errorText(error)}`))
   })
+  return true
 }
 
 // ---------------------------------------------------------------- commands and band

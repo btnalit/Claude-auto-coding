@@ -12,7 +12,7 @@ const COMPOSER = { kind: 'composer' } as const
 const PASS = '{"verdict":"pass","summary":"task accomplished","findings":[]}'
 const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
 
-type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean }
+type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean }
 
 function world(on: On, replies: Replies = {}) {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 4, 8) })
@@ -35,7 +35,15 @@ function world(on: On, replies: Replies = {}) {
   on('fs.exists', () => ({ value: false }))
   on('fs.read', () => ({ deny: 'no such file' }))
   on('fs.write', () => ({ value: undefined }))
-  on('model.fork', () => ({ value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }))
+  // A held fork answers only once the test releases it, so the test can act while a decision is in flight.
+  let releaseFork = () => {}
+  const forkReleased = new Promise<void>(resolve => {
+    releaseFork = resolve
+  })
+  on('model.fork', async () => {
+    if (replies.isForkHeld === true) await forkReleased
+    return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
+  })
   on('model.complete', () =>
     replies.isReviewAborted === true
       ? { value: { isAnswered: false, reason: 'aborted', usage: USAGE } }
@@ -50,7 +58,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs }
+  return { clock, submitted, argvs, releaseFork }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -293,4 +301,33 @@ test('the boundary denies merges and releases only while a task is active', asyn
   expect(push.deny).toBeUndefined()
   expect(pr.deny).toBeUndefined()
   expect(ran).toEqual(['Bash', 'Bash', 'PowerShell'])
+})
+
+test('a long decision keeps its action at the head of the log row and the stage', async ($, on) => {
+  const w = world(on, { decision: `{"action":"verify","reason":"${'x'.repeat(400)}"}` })
+  await startTask($, w, 'start parse dates')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(60) })
+  expect(await ui.find({ type: 'Text', text: /verify：x{20}/ })).toBeDefined()
+  const stage = await ui.find({ key: 'stage-decide' })
+  expect(stage?.text).toContain('verify')
+  expect(stage?.text).not.toContain('xxxxxxxxxx')
+  await ui.unmount()
+})
+
+test('a decision a pause overtook is never logged or acted on', async ($, on) => {
+  const w = world(on, { isForkHeld: true })
+  await startTask($, w, 'start refactor')
+  const ending = endTurn($, 'done')
+  await w.clock.settle()
+  await supervise($, 'pause')
+  w.releaseFork()
+  await ending
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('已暂停')
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(110) })
+  expect(await ui.find({ type: 'Text', text: /verify：/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /检查/ })).toBeDefined()
+  await ui.unmount()
 })

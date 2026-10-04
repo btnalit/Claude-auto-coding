@@ -3,3 +3,5 @@
 # Written by the engine too; it extends the folder above
 tsconfig.json
 node_modules/
+# Worktrees `claude -w` creates inside the repo
+.claude/worktrees/
