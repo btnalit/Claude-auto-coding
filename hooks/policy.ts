@@ -90,7 +90,9 @@ export function stripData(command: string): string {
       continue
     }
     kept.push(line)
-    const heredoc = /<<-?\s*(['"]?)(\w+)\1/.exec(line)
+    // Arithmetic (`$((1<<2))`), a here-string (`<<<`) and a shift in code (`print(1<<2)`) open no heredoc:
+    // their lines would otherwise swallow the commands after them.
+    const heredoc = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_]\w*)\1/.exec(line.replace(/\(\([\s\S]*?\)\)/g, ' '))
     // A body a shell reads is commands wherever the shell sits on the line: `bash -s <<EOF`, `cat <<EOF | bash`.
     if (heredoc !== null && !isRunByShell(line) && !GRAPHQL.test(line)) terminator = heredoc[2]
   }

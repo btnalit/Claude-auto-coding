@@ -105,6 +105,9 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['Invoke-Expression @"\ngit push --tags\n"@', onFeature],
     ["@'\ngit tag v1.4.0\n'@ | iex", onFeature],
     ["gh api graphql -F query=@- <<'EOF'\nmutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }\nEOF", onFeature],
+    ['echo $((1<<2))\ngit push origin main', onFeature],
+    ['cat <<< "x"\ngit push origin main', onFeature],
+    ["python -c 'print(1<<2)'\ngit push origin main", onFeature],
   ]
   for (const [command, context] of denied) {
     test(`denies: ${command.split('\n')[0]}`, () => {
