@@ -386,6 +386,16 @@ test('the panel follows the task: active stage, log, budget, boundary', async ($
   await ui.unmount()
 })
 
+test('the pipeline is drawn as boxes only where a box holds its stage line', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  for (const [columns, border] of [[80, undefined], [110, 'dashed']] as const) {
+    const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(columns) })
+    expect((await ui.find({ key: 'stage-worker' }))?.props.borderStyle).toBe(border)
+    await ui.unmount()
+  }
+})
+
 test('the panel animates only while the task is working', async ($, on) => {
   const w = world(on)
   let redraws = 0

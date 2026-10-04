@@ -38,7 +38,11 @@ export const ROLE_COLOR: Record<SuperviseRole, string> = {
 }
 
 export const TICK_MS = 200
-const WIDE = 72
+const WIRE_CELLS = 5
+/** The widest stage line, `◐ 运行检查` or `◐ 第 12 轮`: ten cells inside a box's two borders. */
+const STAGE_CELLS = 10
+/** Below this the five boxes and their wires cannot hold a stage line, so the stages are drawn as rows. */
+const WIDE = 5 * (WIRE_CELLS + STAGE_CELLS + 2)
 
 export type PanelActions = {
   pause: () => void
@@ -235,14 +239,13 @@ function Pipeline(el: ElementTable, model: PanelModel, width: number) {
       </Box>
     )
   }
-  const wireCellsWide = 5
-  const boxWidth = Math.max(9, Math.floor((width - wireCellsWide * STAGES.length) / STAGES.length))
+  const boxWidth = Math.floor((width - WIRE_CELLS * STAGES.length) / STAGES.length)
   const parts = views.flatMap((v, i) => {
     const into = i === active && frame !== undefined ? frame : undefined
     const isLit = i <= active || v.tone !== 'pending'
     return [
-      <Box key={`wire-${v.key}`} width={wireCellsWide}>
-        {Wire(el, wireCellsWide, v.color, into)}
+      <Box key={`wire-${v.key}`} width={WIRE_CELLS}>
+        {Wire(el, WIRE_CELLS, v.color, into)}
       </Box>,
       <Box
         key={`stage-${v.key}`}
