@@ -18,7 +18,8 @@ const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
 const REBASE_OPTIONS_WITH_VALUE = new Set(['--onto', '-s', '--strategy', '-X', '--strategy-option', '-x', '--exec'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
 const GRAPHQL = /\bgh\b.*\bgraphql\b/
-const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
+// `v1.2.3`, `1.2.3-rc.1`, `1.2.3+build`; not a maintenance branch such as `2.0.x`.
+const TAG_LIKE = /^v?\d+(\.\d+)+([-+].*)?$/
 const YARN_BUMP = /^--(major|minor|patch|premajor|preminor|prepatch|prerelease|new-version)(=|$)/
 
 /** `words` are the arguments that are not flags; `args` all of them. */
@@ -34,8 +35,8 @@ const PUBLISHERS: Record<string, (words: string[], args: string[]) => boolean> =
   twine: w => w.includes('upload'),
   gem: w => w.includes('push'),
   dotnet: w => w.includes('nuget') && w.includes('push'),
-  docker: w => w[0] === 'push',
-  podman: w => w[0] === 'push',
+  docker: isImagePush,
+  podman: isImagePush,
   vsce: w => w.includes('publish'),
   ovsx: w => w.includes('publish'),
   lerna: w => w.includes('publish') || w.includes('version'),
@@ -57,7 +58,10 @@ export function checkCommand(command: string, context: BoundaryContext): string 
   return undefined
 }
 
-/** Whether checking the command needs the current branch (a push, merge, rebase or checkout). */
+/**
+ * Whether checking the command needs the current branch: a push, merge or rebase. A checkout or
+ * switch before them in the same command is followed by `checkCommand` itself.
+ */
 export function needsBranch(command: string): boolean {
   return /\bgit\b/.test(command) && /\b(push|merge|rebase)\b/.test(command)
 }
@@ -86,7 +90,9 @@ export function stripData(command: string): string {
       continue
     }
     kept.push(line)
-    const heredoc = /<<-?\s*(['"]?)(\w+)\1/.exec(line)
+    // Arithmetic (`$((1<<2))`), a here-string (`<<<`) and a shift in code (`print(1<<2)`) open no heredoc:
+    // their lines would otherwise swallow the commands after them.
+    const heredoc = /(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_]\w*)\1/.exec(line.replace(/\(\([\s\S]*?\)\)/g, ' '))
     // A body a shell reads is commands wherever the shell sits on the line: `bash -s <<EOF`, `cat <<EOF | bash`.
     if (heredoc !== null && !isRunByShell(line) && !GRAPHQL.test(line)) terminator = heredoc[2]
   }
@@ -122,6 +128,14 @@ function programOf(token: string): string {
 
 function isVersionBump(words: string[]): boolean {
   return words[0] === 'version' && words.length > 1
+}
+
+/** `push`, `image push`, `manifest push`, or a build that pushes what it builds (`buildx build --push`). */
+function isImagePush(words: string[], args: string[]): boolean {
+  if (words[0] === 'push') return true
+  if ((words[0] === 'image' || words[0] === 'manifest') && words[1] === 'push') return true
+  const isBuild = words[0] === 'build' || (words[0] === 'buildx' && (words[1] === 'build' || words[1] === 'bake'))
+  return isBuild && args.some(a => a === '--push' || /\b(push=true|type=registry)\b/.test(a))
 }
 
 /** `command` is the whole command as checked, for what the statement split cuts apart. */
@@ -216,8 +230,10 @@ function checkPush(rest: string[], context: BoundaryContext): string | undefined
     if (bare.includes('refs/tags/')) return `git push 推送 tag ${bare}`
     const colon = bare.indexOf(':')
     let target = colon === -1 || isDelete ? bare : bare.slice(colon + 1)
-    if (target === 'HEAD' || target === '@') target = context.branch ?? target
-    if (TAG_LIKE.test(target)) return `git push 推送疑似版本 tag ${target}`
+    // HEAD is the branch checked out: pushing it is a branch push, whatever its name looks like (`3.11`).
+    const isHead = target === 'HEAD' || target === '@'
+    if (isHead) target = context.branch ?? target
+    if (!isHead && TAG_LIKE.test(target)) return `git push 推送疑似版本 tag ${target}`
     if (isProtected(target, context.protectedBranches)) {
       return colon === 0 || isDelete ? `git push 删除受保护分支 ${target}` : `直接推送受保护分支 ${target}（等同绕过 PR 合并）`
     }
@@ -237,13 +253,14 @@ function checkGh(args: string[], context: BoundaryContext, command: string): str
   if (group !== 'api') return undefined
   const text = args.join(' ')
   // A GraphQL body's braces split it off this statement, so the mutation is looked for in the whole command.
-  if (/mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRelease|updateRelease|createRef/.test(command)) {
-    return 'gh api graphql 合并或发版操作'
-  }
+  // The reason names it: the panel's rail tells a merge from a release by it.
+  const mutation = /mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRelease|updateRelease|createRef/.exec(command)
+  if (mutation !== null) return `gh api graphql ${mutation[0]}（合并或发版操作）`
   const isMutation = /(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)(\s|=|$)/.test(text) && !/(-X|--method)[\s=]+GET\b/i.test(text)
   if (!isMutation) return undefined
   if (/\/pulls\/\d+\/merge\b|\/merges\b/.test(text)) return 'gh api 合并 PR'
-  if (/\/releases\b|\/git\/refs\/tags\b|\/git\/tags\b/.test(text)) return 'gh api 发版或写 tag'
+  if (/\/releases\b/.test(text)) return 'gh api 发版'
+  if (/\/git\/refs\/tags\b|\/git\/tags\b/.test(text)) return 'gh api 写 tag'
   const head = /\/git\/refs\/heads\/([\w./-]+)/.exec(text)
   return head !== null && isProtected(head[1], context.protectedBranches) ? `gh api 改写受保护分支 ${head[1]}` : undefined
 }
@@ -255,5 +272,10 @@ function switchedTo(tokens: string[]): string | undefined {
   if (git === undefined || (git.sub !== 'checkout' && git.sub !== 'switch')) return undefined
   const create = git.rest.findIndex(a => ['-b', '-B', '-c', '-C', '--orphan'].includes(a))
   if (create !== -1) return git.rest[create + 1]
-  return git.rest.find(a => !a.startsWith('-') && a !== '--')
+  // `git checkout main -- README.md` (or `main README.md`) restores files and stays on the branch;
+  // a bare trailing `--` (`git checkout main --`) still switches.
+  const dashes = git.rest.indexOf('--')
+  const names = (dashes === -1 ? git.rest : git.rest.slice(0, dashes)).filter(a => !a.startsWith('-'))
+  const hasPaths = names.length > 1 || (dashes !== -1 && dashes < git.rest.length - 1)
+  return git.sub === 'checkout' && hasPaths ? undefined : names[0]
 }

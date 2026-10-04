@@ -13,6 +13,8 @@ const PASS = '{"verdict":"pass","summary":"task accomplished","findings":[]}'
 const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
 /** An answer whose turn.complete fails beneath the mod. */
 const CORE_FAILS = 'core fails'
+/** An answer whose turn.complete beneath the mod finishes only once the test releases it. */
+const CORE_HELD = 'core held'
 
 type Replies = {
   decision?: string
@@ -20,6 +22,8 @@ type Replies = {
   checkExit?: number
   isReviewAborted?: boolean
   isForkHeld?: boolean
+  /** The decision fork rejects, as no step expects. */
+  isForkFailing?: boolean
   isCheckHeld?: boolean
   /** What `git status` prints. */
   status?: string
@@ -52,9 +56,17 @@ function world(on: On, replies: Replies = {}) {
     if (line.startsWith('git status')) return run(replies.status ?? '')
     return run('')
   })
-  on('fs.exists', () => ({ value: false }))
-  on('fs.read', () => ({ deny: 'no such file' }))
-  on('fs.write', () => ({ value: undefined }))
+  // Files the mod writes (its audit logs) are there to read back; nothing else is.
+  const files = new Map<string, string>()
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.read', ($, e) => {
+    const text = files.get(e.path)
+    return text === undefined ? { deny: 'no such file' } : { value: text }
+  })
+  on('fs.write', ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
   // A held fork answers only once the test releases it, so the test can act while a decision is in flight.
   let releaseFork = () => {}
   const forkReleased = new Promise<void>(resolve => {
@@ -63,6 +75,7 @@ function world(on: On, replies: Replies = {}) {
   const forks: string[] = []
   on('model.fork', async ($, e) => {
     forks.push(e.prompt)
+    if (replies.isForkFailing === true) throw new Error('model.fork failed beneath the mod')
     if (replies.isForkHeld === true) await forkReleased
     return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
   })
@@ -78,16 +91,24 @@ function world(on: On, replies: Replies = {}) {
     return { text: e.text }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('turn.complete', ($, e) => {
+  let releaseEnd = () => {}
+  const endReleased = new Promise<void>(resolve => {
+    releaseEnd = resolve
+  })
+  on('turn.complete', async ($, e) => {
     if (e.answer === CORE_FAILS) throw new Error('turn.complete failed beneath the mod')
+    if (e.answer === CORE_HELD) await endReleased
     return { text: e.answer }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  // Without it session.start would stop at the command and never pick up a step, as a reload does.
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, forks, reviews, releaseFork, releaseCheck }
+  return { clock, submitted, argvs, forks, reviews, files, releaseFork, releaseCheck, releaseEnd }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -106,7 +127,7 @@ function shell($: Engine, tool: 'Bash' | 'PowerShell', command: string) {
   return $.tool.call({ tool, command } as unknown as Parameters<Engine['tool']['call']>[0])
 }
 
-function endTurn($: Engine, answer: string, extra: { agentId?: string; reason?: 'answer' | 'aborted' } = {}) {
+function endTurn($: Engine, answer: string, extra: { agentId?: string; reason?: 'answer' | 'aborted' | 'error' } = {}) {
   const reason = extra.reason ?? 'answer'
   return $.turn.complete({ answer, durationMs: 1000, isAborted: reason === 'aborted', turnId: 'turn-1', reason, agentId: extra.agentId })
 }
@@ -125,6 +146,12 @@ test('a finished turn is verified, reviewed and completed', async ($, on) => {
   expect(status).toContain('轮次 1/40')
   expect(status).toContain('Review：pass')
   expect(w.argvs).toContain('git diff --check abc1234')
+})
+
+test('a positive budget below one is a budget of one', { options: { maxTurns: 0.5, maxRepairRounds: 0.5 } }, async ($, on) => {
+  const w = world(on)
+  expect(await startTask($, w, 'start refactor')).toContain('预算 1 轮')
+  expect(await supervise($, 'status')).toContain('轮次 0/1 · 修复 0/1')
 })
 
 test('a failed check sends a repair turn', async ($, on) => {
@@ -250,6 +277,47 @@ test('a turn the person starts while paused does not count, but its reply is sti
   expect(w.forks.at(-1)).toContain('what the person got')
 })
 
+test('a resume while a paused turn is still ending decides on that turn', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  // The turn has ended and dropped its marker; the engine beneath is still taking its end.
+  const ending = endTurn($, CORE_HELD)
+  await w.clock.settle()
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(w.forks).toHaveLength(0)
+
+  w.releaseEnd()
+  await ending
+  await w.clock.settle()
+  expect(w.forks.at(-1)).toContain(CORE_HELD)
+  const status = await supervise($, 'status')
+  expect(status).toContain('已完成')
+  expect(status).toContain('轮次 1/40')
+})
+
+test("a start while the stopped task's turn is still ending waits for it too", async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'stop')
+  const ending = endTurn($, CORE_HELD)
+  await w.clock.settle()
+  expect(await supervise($, 'start add tests')).toContain('等这一轮结束')
+  expect(w.submitted).toHaveLength(1)
+
+  w.releaseEnd()
+  await ending
+  await w.clock.advance(1_000)
+  expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
+  const status = await supervise($, 'status')
+  expect(status).toContain('Worker 工作中')
+  expect(status).toContain('轮次 0/40')
+  expect(w.submitted).toHaveLength(2)
+})
+
 /** Pauses and resumes the task, and says whether the resume waited for a turn in flight. */
 async function pauseAndResume($: Engine, w: { clock: { settle: () => Promise<void> } }): Promise<boolean> {
   await supervise($, 'pause')
@@ -292,6 +360,21 @@ test('a session that ends mid-turn leaves no turn in flight for the next task', 
   expect(await supervise($, 'status')).toContain('已完成')
 })
 
+test('two tasks started within one second keep audit logs of their own', async ($, on) => {
+  const w = world(on)
+  const first = (await startTask($, w, 'start refactor')).match(/T[\d-]+/)?.[0]
+  await supervise($, 'stop')
+  await supervise($, 'clear')
+  const second = (await startTask($, w, 'start add tests')).match(/T[\d-]+/)?.[0]
+  expect(first).toBe('T261004080000')
+  expect(second).toBe('T261004080000-2')
+  const logOf = (id: string | undefined) => [...w.files].find(([path]) => path.replace(/\\/g, '/').endsWith(`/auto-coding/${id}.jsonl`))?.[1] ?? ''
+  const firstLog = logOf(first)
+  expect([...w.files.keys()]).toHaveLength(2)
+  expect(firstLog).toContain('refactor')
+  expect(firstLog).not.toContain('add tests')
+})
+
 test("a start waits for the stopped task's turn instead of taking it as its own", async ($, on) => {
   const w = world(on)
   await startTask($, w, 'start refactor')
@@ -332,6 +415,14 @@ test('the band draws the task on every surface and its buttons act on it', async
   await ui.press({ key: 'stop' })
   expect(await supervise($, 'status')).toContain('已停止')
   expect(await ui.find({ key: 'clear' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a multi-line goal is drawn on one row', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start add a login page\n\nand a logout button')
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /add a login page and a logout button/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -386,6 +477,16 @@ test('the panel follows the task: active stage, log, budget, boundary', async ($
   await ui.unmount()
 })
 
+test('the pipeline is drawn as boxes only where a box holds its stage line', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  for (const [columns, border] of [[80, undefined], [110, 'dashed']] as const) {
+    const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(columns) })
+    expect((await ui.find({ key: 'stage-worker' }))?.props.borderStyle).toBe(border)
+    await ui.unmount()
+  }
+})
+
 test('the panel animates only while the task is working', async ($, on) => {
   const w = world(on)
   let redraws = 0
@@ -402,6 +503,121 @@ test('the panel animates only while the task is working', async ($, on) => {
   const settled = redraws
   await w.clock.advance(2_000)
   expect(redraws).toBe(settled)
+})
+
+test('a resume while a tick reads the pause keeps the panel moving', async ($, on) => {
+  // Holds the next read of the task once it has read it, so the test can act between the read and its use.
+  let isNextReadHeld = false
+  let releaseRead = () => {}
+  on('state.get', async ($, e, next) => {
+    const value = await next(e)
+    if (isNextReadHeld && e.plugin === 'auto-coding' && e.key === 'task') {
+      isNextReadHeld = false
+      await new Promise<void>(resolve => {
+        releaseRead = resolve
+      })
+    }
+    return value
+  })
+  const w = world(on)
+  let redraws = 0
+  on('ui.invalidate', () => {
+    redraws += 1
+    return { value: undefined }
+  })
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  isNextReadHeld = true
+  await w.clock.advance(200)
+  // The tick has read `paused`; the resume finds its ticker still there before the tick stops it.
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+  releaseRead()
+  await w.clock.settle()
+  const settled = redraws
+  await w.clock.advance(1_000)
+  expect(redraws).toBeGreaterThan(settled)
+})
+
+test('a step that fails unexpectedly pauses the task instead of leaving it deciding', async ($, on) => {
+  const w = world(on, { isForkFailing: true })
+  await startTask($, w, 'start refactor')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('监督步骤出错：')
+  expect(status).toContain('/supervise resume 重试')
+})
+
+test('Esc during the publishing turn pauses the task instead of ending it', { options: { publish: 'push' } }, async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('发布中')
+  expect(w.submitted.at(-1)).toContain('把当前分支推到 origin')
+
+  await endTurn($, 'half way through the push', { reason: 'aborted' })
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('你中断了发布这一轮')
+})
+
+const RETRY = '从中断处继续'
+
+test('a reload while an API error is waited out keeps the wait and retries the Worker', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('API 错误，30s 后重试')
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(110) })
+  expect((await ui.find({ key: 'stage-decide' }))?.text).toContain('重试 30s')
+  await ui.unmount()
+
+  // A reload picks a deciding task up a second after it loads.
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+  await w.clock.advance(1_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(0)
+
+  await w.clock.advance(29_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+})
+
+test('a resume while an API error is waited out retries now, once', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+
+  await w.clock.advance(30_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+})
+
+test("a resume while a reload's re-run is pending runs the step once", async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  // Three copies of one step from one snapshot: the backoff's, the reload's and the resume's.
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+  await supervise($, 'resume')
+  await w.clock.advance(31_000)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(w.forks).toHaveLength(0)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
 })
 
 test('a review cut short pauses the task instead of parking it', async ($, on) => {

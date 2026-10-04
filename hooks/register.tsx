@@ -61,7 +61,8 @@ type Settings = {
 }
 
 function settingsOf(options: PluginOptions): Settings {
-  const count = (value: unknown, fallback: number) => (typeof value === 'number' && value > 0 ? Math.floor(value) : fallback)
+  // A positive budget is at least one: `maxTurns: 0.5` would floor to none and verify after the first turn.
+  const count = (value: unknown, fallback: number) => (typeof value === 'number' && value > 0 ? Math.max(1, Math.floor(value)) : fallback)
   const publish = options.publish
   return {
     reviewerModel: typeof options.reviewerModel === 'string' && options.reviewerModel !== '' ? options.reviewerModel : 'opus',
@@ -92,9 +93,10 @@ export const register: Register = (on, options) => {
     if (task !== null) {
       $.ui.status(statusLine(task))
       if (isWorking(task.status)) animate($)
-      // A reload drops the step that was running; pick it up again.
+      // A reload drops the step that was running; pick it up again. A wait before a retry keeps what is left of it.
       if (task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing') {
-        $.clock.after(1_000, () => detach($, inFlight(() => resumeStep($, task))))
+        const delay = task.retryAt === undefined ? 1_000 : Math.max(1_000, task.retryAt - (await $.clock.now()))
+        $.clock.after(delay, () => detach($, inFlight($, task, () => resumeStep($, task))))
       }
     }
     return next(e)
@@ -124,7 +126,7 @@ export const register: Register = (on, options) => {
       // Only a step a reload cut off is stuck; one still running here would run twice, side by side.
       if (isStuck && stepsInFlight > 0) return { text: `任务 ${task.id} ${LABEL[task.status]}：这一步仍在运行，无需恢复。` }
       const isTurnRunning = task.status === 'paused' && (await read($, WORKER_TURN)) !== null
-      $.clock.after(0, () => detach($, inFlight(() => resumeStep($, task))))
+      $.clock.after(0, () => detach($, inFlight($, task, () => resumeStep($, task))))
       return {
         text: isTurnRunning
           ? `恢复 ${task.id}：Worker 这一轮还在进行，等这一轮结束后再决策。`
@@ -150,26 +152,32 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     // A subagent's turn is the Worker's own business, not a Worker turn.
     if (e.agentId !== undefined) return next(e)
-    // The turn has ended whatever happens beneath: a failure there must not leave it marked in flight.
-    await update($, WORKER_TURN, () => null)
-    const result = await next(e)
-    const task = await read($, TASK)
-    if (task === null) return result
     const end: TurnEnd = {
       reason: e.reason,
       answer: e.answer,
       turnId: e.turnId,
       refusal: e.reason === 'refusal' ? (e.refusal.explanation ?? e.refusal.category ?? undefined) : undefined,
     }
-    if (task.status === 'paused') {
-      await notePausedTurn($, task, end)
-      return result
+    // From the marker's drop until a paused task has this turn written down, a resume waits: deciding
+    // sooner would read the turn before it and leave this one uncounted.
+    const written = writing()
+    let result: Awaited<ReturnType<typeof next>>
+    let ended: SuperviseTask | null
+    try {
+      // The turn has ended whatever happens beneath: a failure there must not leave it marked in flight.
+      await update($, WORKER_TURN, () => null)
+      result = await next(e)
+      ended = await read($, TASK)
+      if (ended !== null && ended.status === 'paused') await notePausedTurn($, ended, end)
+    } finally {
+      written()
     }
-    if (task.status !== 'running' && task.status !== 'publishing') return result
+    const task = ended
+    if (task === null || (task.status !== 'running' && task.status !== 'publishing')) return result
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
-      await inFlight(() => onWorkerTurn($, task, end, next.signal))
+      await inFlight($, task, () => onWorkerTurn($, task, end, next.signal))
     } catch (error) {
       $.ui.log(`auto-coding: ${errorText(error)}`)
     }
@@ -272,6 +280,8 @@ async function patch($: Engine, task: SuperviseTask, change: Partial<SuperviseTa
   if (change.status === 'paused' && task.status !== 'paused') {
     change = { ...change, pausedOnTurn: (await read($, WORKER_TURN)) ?? undefined }
   }
+  // A planned retry belongs to the wait it was planned in: any other transition drops it.
+  if (change.status !== undefined && !('retryAt' in change)) change = { ...change, retryAt: undefined }
   let applied: SuperviseTask | undefined
   await update($, TASK, current => {
     applied = undefined
@@ -312,6 +322,9 @@ async function tick($: Engine): Promise<void> {
   if (task === null || !isWorking(task.status)) {
     ticker?.cancel()
     ticker = undefined
+    // A resume while the read above was on its way found this ticker still running and left the motion to it.
+    const now = await read($, TASK)
+    if (now !== null && isWorking(now.status)) animate($)
   }
   $.ui.invalidate('ui.render')
 }
@@ -359,18 +372,59 @@ function log($: Engine, task: SuperviseTask, type: string, detail?: unknown): Pr
 // or reviewing task a reload cut off is told from one whose step is still at work.
 let stepsInFlight = 0
 
-async function inFlight(step: () => Promise<void>): Promise<void> {
+// Settles once the main loop's latest turn end is written down. A reload starts it settled.
+let turnWritten: Promise<void> = Promise.resolve()
+let isTurnEnding = false
+
+/** Marks a turn end as being written down; the function it returns says it is. */
+function writing(): () => void {
+  let done = () => {}
+  isTurnEnding = true
+  turnWritten = new Promise<void>(resolve => {
+    done = () => {
+      isTurnEnding = false
+      resolve()
+    }
+  })
+  return done
+}
+
+/** Runs a step of `task`'s loop, counted while it runs; one that fails unexpectedly leaves the task paused. */
+async function inFlight($: Engine, task: SuperviseTask, step: () => Promise<void>): Promise<void> {
   stepsInFlight += 1
+  let failure: { error: unknown } | undefined
   try {
     await step()
+  } catch (error) {
+    failure = { error }
   } finally {
     stepsInFlight -= 1
   }
+  if (failure === undefined) return
+  await stall($, task, failure.error)
+  throw failure.error
+}
+
+/**
+ * After a step failed unexpectedly nothing moves its task on: the spinner would turn for good and a
+ * `-p` session would end on a working task. Unless another step is at work, the task is paused, saying why.
+ */
+async function stall($: Engine, origin: SuperviseTask, error: unknown): Promise<void> {
+  const task = await read($, TASK)
+  if (task === null || task.id !== origin.id || !isWorking(task.status) || stepsInFlight > 0) return
+  await patch($, task, { status: 'paused', note: `监督步骤出错：${head(errorText(error), 200)}；/supervise resume 重试` })
 }
 
 /** `signal` is the turn.complete dispatch's: it aborts when the person presses Esc during the steps. */
 async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd, signal: AbortSignal): Promise<void> {
-  if (task.status === 'publishing') return finishPublish($, task)
+  if (task.status === 'publishing') {
+    // Esc hands the publishing turn to the person, as on any turn; however else it ended, the remote says how far it got.
+    if (end.reason === 'aborted') {
+      await patch($, task, { status: 'paused', note: '你中断了发布这一轮；/supervise resume 恢复自动监督' })
+      return
+    }
+    return finishPublish($, task)
+  }
   const turns = task.turns + 1
   await record($, 'worker', `第 ${turns} 轮结束${end.reason === 'answer' ? '' : `（${end.reason}）`}`, end.reason === 'answer' ? undefined : 'warn')
   if (end.reason === 'aborted') {
@@ -381,10 +435,10 @@ async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd, signal
   if (end.reason === 'error') {
     const errors = task.errors + 1
     if (errors > MAX_API_ERRORS) return finish($, task, 'failed', `Worker 连续 ${errors} 轮 API 错误`)
-    const waiting = await patch($, task, { status: 'deciding', turns, errors, note: `API 错误，${errors * 30}s 后重试` })
-    if (waiting !== undefined) {
-      $.clock.after(errors * 30_000, () => detach($, send($, waiting, 'running', '上一轮因 API 错误中断。从中断处继续完成任务。')))
-    }
+    const wait = errors * 30_000
+    const retryAt = (await $.clock.now()) + wait
+    const waiting = await patch($, task, { status: 'deciding', turns, errors, retryAt, note: `API 错误，${errors * 30}s 后重试` })
+    if (waiting !== undefined) $.clock.after(wait, () => detach($, inFlight($, waiting, () => resumeStep($, waiting))))
     return
   }
   const deciding = await patch($, task, { status: 'deciding', turns, errors: 0, lastAnswer: tail(end.answer, 4000), note: undefined })
@@ -416,6 +470,13 @@ async function notePausedTurn($: Engine, task: SuperviseTask, end: TurnEnd): Pro
 async function resumeStep($: Engine, task: SuperviseTask): Promise<void> {
   if (task.status === 'verifying' || task.status === 'reviewing') return verify($, task, '重新验收（上一次被重载打断）')
   if (task.status !== 'deciding' && task.status !== 'paused') return
+  // Waiting out an API error is no decision: what was decided is the retry, and its time has come (or a resume calls it now).
+  if (task.status === 'deciding' && task.retryAt !== undefined) {
+    await send($, task, 'running', '上一轮因 API 错误中断。从中断处继续完成任务。')
+    return
+  }
+  // A turn whose end is still being written down is read once it is (no transition, so `task`'s seq still holds).
+  if (task.status === 'paused') await turnWritten
   // The turn in flight decides at its own turn.complete; deciding now would read half a turn and queue a second.
   if (task.status === 'paused' && (await read($, WORKER_TURN)) !== null) {
     await patch($, task, { status: 'running', note: '已恢复：等 Worker 这一轮结束后再决策' })
@@ -663,7 +724,7 @@ async function pauseFromBand($: Engine): Promise<void> {
 
 async function resumeFromBand($: Engine): Promise<void> {
   const task = await read($, TASK)
-  if (task !== null && task.status === 'paused') await inFlight(() => resumeStep($, task))
+  if (task !== null && task.status === 'paused') await inFlight($, task, () => resumeStep($, task))
 }
 
 async function stopFromBand($: Engine): Promise<void> {
@@ -686,8 +747,9 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   if (existing !== null && isActive(existing.status)) {
     return { text: `已有监督任务 ${existing.id}（${LABEL[existing.status]}）。先 /supervise stop。` }
   }
-  // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn.
-  if ((await read($, WORKER_TURN)) !== null) {
+  // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn,
+  // and so would one that has dropped its marker but not yet read the task.
+  if ((await read($, WORKER_TURN)) !== null || isTurnEnding) {
     return { text: '会话里还有一轮在进行（正在跑的回合不会被打断）。等这一轮结束后再 /supervise start。' }
   }
   let cwd: string
@@ -704,8 +766,14 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   if ('error' in project) return { text: project.error }
 
   const now = await $.clock.now()
+  const logDir = `${gitDir.stdout.trim()}/auto-coding`
+  // An id is to the second: a task started in the same second as the last one (start, stop, clear,
+  // start) takes a suffix, so each keeps an audit log of its own.
+  const stamp = `T${new Date(now).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`
+  let id = stamp
+  for (let n = 2; id === existing?.id || (await $.fs.exists(`${logDir}/${id}.jsonl`).catch(() => false)); n += 1) id = `${stamp}-${n}`
   const task: SuperviseTask = {
-    id: `T${new Date(now).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`,
+    id,
     goal,
     cwd,
     gitDir: gitDir.stdout.trim(),

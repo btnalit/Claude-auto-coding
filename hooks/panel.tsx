@@ -38,7 +38,11 @@ export const ROLE_COLOR: Record<SuperviseRole, string> = {
 }
 
 export const TICK_MS = 200
-const WIDE = 72
+const WIRE_CELLS = 5
+/** The widest stage line, `◐ 运行检查` or `◐ 第 12 轮`: ten cells inside a box's two borders. */
+const STAGE_CELLS = 10
+/** Below this the five boxes and their wires cannot hold a stage line, so the stages are drawn as rows. */
+const WIDE = 5 * (WIRE_CELLS + STAGE_CELLS + 2)
 
 export type PanelActions = {
   pause: () => void
@@ -128,6 +132,9 @@ export function padCells(text: string, cells: number): string {
   return text + ' '.repeat(Math.max(0, cells - width))
 }
 
+/** A row's text on one row: a pasted multi-line goal or a model's multi-line reason would add rows. */
+export const oneLine = (text: string): string => text.replace(/\s*[\r\n]+\s*/g, ' ')
+
 export function clockOf(at: number): string {
   const d = new Date(at)
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':')
@@ -151,7 +158,8 @@ export function stageViews(task: SuperviseTask | null, events: readonly Supervis
   const lastDecision = [...events].reverse().find(e => e.who === 'decide')?.text.split('：')[0] ?? '—'
   const subs = [
     active === 0 ? `${spin} 第 ${task.turns + 1} 轮` : `${task.turns} 轮`,
-    active === 1 ? `${spin} 判断中` : lastDecision,
+    // Waiting out an API error is no decision being made: the stage counts down to the retry.
+    active === 1 ? (task.retryAt === undefined ? `${spin} 判断中` : `${spin} 重试 ${Math.max(0, Math.ceil((task.retryAt - now) / 1000))}s`) : lastDecision,
     active === 2 ? `${spin} 运行检查` : checks === undefined ? '—' : `${passed}/${checks.length} ${passed === checks.length ? '✓' : '✗'}`,
     active === 3 ? `${spin} ${task.reviewerModel}` : (task.lastReview?.verdict ?? '—'),
     active === 4 ? `${spin} ${task.publish}` : isActive(task.status) ? '—' : LABEL[task.status],
@@ -170,11 +178,17 @@ export function stageViews(task: SuperviseTask | null, events: readonly Supervis
 const toneColor = (view: StageView): string =>
   view.tone === 'bad' ? TOKENS.rd : view.tone === 'warn' ? TOKENS.ye : view.tone === 'pending' ? TOKENS.line2 : view.color
 
-/** Which side-rail trigger a denial lights. */
+/**
+ * Which side-rail trigger a denial (`<tool>: <command> — <reason>`) lights. Only the reason counts,
+ * without its note in brackets or the branch and tag it names: on main `git merge release-notes`
+ * is a merge, and pushing a protected `release/1.2` is too.
+ */
 export function railOf(denial: string): '合并' | 'tag' | '发版' | '发布' {
-  if (/\btag\b|refs\/tags/.test(denial)) return 'tag'
-  if (/release/.test(denial)) return '发版'
-  if (/发布制品/.test(denial)) return '发布'
+  const at = denial.lastIndexOf(' — ')
+  const reason = (at === -1 ? denial : denial.slice(at + 3)).replace(/（[^）]*）/g, '').replace(/(受保护分支|tag) \S+/g, '$1')
+  if (/发布制品/.test(reason)) return '发布'
+  if (/release|发版/i.test(reason)) return '发版'
+  if (/\btags?\b|refs\/tags/.test(reason)) return 'tag'
   return '合并'
 }
 
@@ -186,9 +200,9 @@ function Runs(el: ElementTable, runs: readonly Run[], key?: string) {
   const { Text } = el
   return (
     <Text key={key} wrap="truncate-end">
-      {runs.map(r => (
-        <Text color={r.color} bold={r.isBold === true}>
-          {r.text}
+      {runs.map((r, i) => (
+        <Text key={String(i)} color={r.color} bold={r.isBold === true}>
+          {oneLine(r.text)}
         </Text>
       ))}
     </Text>
@@ -229,14 +243,13 @@ function Pipeline(el: ElementTable, model: PanelModel, width: number) {
       </Box>
     )
   }
-  const wireCellsWide = 5
-  const boxWidth = Math.max(9, Math.floor((width - wireCellsWide * STAGES.length) / STAGES.length))
+  const boxWidth = Math.floor((width - WIRE_CELLS * STAGES.length) / STAGES.length)
   const parts = views.flatMap((v, i) => {
     const into = i === active && frame !== undefined ? frame : undefined
     const isLit = i <= active || v.tone !== 'pending'
     return [
-      <Box key={`wire-${v.key}`} width={wireCellsWide}>
-        {Wire(el, wireCellsWide, v.color, into)}
+      <Box key={`wire-${v.key}`} width={WIRE_CELLS}>
+        {Wire(el, WIRE_CELLS, v.color, into)}
       </Box>,
       <Box
         key={`stage-${v.key}`}
@@ -352,7 +365,7 @@ function Rail(el: ElementTable, denials: readonly string[]) {
         )}
       </Box>
       <Text color={last === undefined ? TOKENS.dim : TOKENS.ye} wrap="truncate-end">
-        {last === undefined ? 'silent on every routine command' : `» ${last.replace(/^\w+: /, '')}`}
+        {last === undefined ? 'silent on every routine command' : `» ${oneLine(last.replace(/^\w+: /, ''))}`}
       </Text>
     </Box>
   )
@@ -361,6 +374,14 @@ function Rail(el: ElementTable, denials: readonly string[]) {
 function Log(el: ElementTable, events: readonly SuperviseEvent[], rows: number) {
   const { Box, Text } = el
   const shown = events.slice(-rows)
+  // A row's key is its event's time, counted among events of the same millisecond: an index would
+  // name another event once the log is full and drops its oldest.
+  const sameMoment = new Map<number, number>()
+  const keys = shown.map(event => {
+    const n = sameMoment.get(event.at) ?? 0
+    sameMoment.set(event.at, n + 1)
+    return `log-${event.at}-${n}`
+  })
   return (
     <Box key="log" flexDirection="column" borderStyle="single" borderColor={TOKENS.line2} paddingX={1}>
       <Text color={TOKENS.dim}>session log</Text>
@@ -377,7 +398,7 @@ function Log(el: ElementTable, events: readonly SuperviseEvent[], rows: number) 
               { text: event.who.padEnd(9), color: ROLE_COLOR[event.who], isBold: isNewest },
               { text: event.text, color: isNewest ? (toneColor ?? TOKENS.wh) : TOKENS.dim, isBold: isNewest },
             ],
-            `log-${events.length - shown.length + i}`,
+            keys[i],
           )
         })
       )}
@@ -499,11 +520,11 @@ export function drawBand(el: ElementTable, model: PanelModel) {
         ])}
       </Box>
       <Text color={TOKENS.mute} wrap="truncate-end">
-        {task.goal}
+        {oneLine(task.goal)}
       </Text>
       {task.note === undefined ? undefined : (
         <Text color={STATUS_COLOR[task.status]} wrap="truncate-end">
-          {`» ${task.note}`}
+          {`» ${oneLine(task.note)}`}
         </Text>
       )}
       <Box columnGap={1}>{buttons}</Box>

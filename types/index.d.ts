@@ -70,6 +70,11 @@ export type SuperviseTask = {
   lastChecks?: SuperviseCheck[]
   lastReview?: SuperviseReview
   note?: string
+  /**
+   * Set while the task (deciding) waits out an API error: when the Worker's turn is retried. Any
+   * other transition drops it.
+   */
+  retryAt?: number
   /** The turn in flight when the task was paused: the Worker's own, the one turn after the pause that counts. */
   pausedOnTurn?: string
 }

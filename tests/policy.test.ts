@@ -28,6 +28,7 @@ describe('allowed: push, PR and ordinary work', () => {
     ['npm version', onFeature],
     ['npm version --json', onFeature],
     ['docker build -t app .', onFeature],
+    ['docker buildx build -t app --load .', onFeature],
     ['gh api repos/o/r/pulls/3/merge', onFeature],
     ['git merge --abort', onMain],
     ["gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }'", onFeature],
@@ -36,6 +37,11 @@ describe('allowed: push, PR and ordinary work', () => {
     ["git commit -m @'\nrelease: git merge main\n'@", onMain],
     ["@'\ngit push origin main\n'@ | Set-Content notes.md", onFeature],
     ["gh api graphql -F query=@- <<'EOF'\nquery { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }\nEOF", onFeature],
+    ['git push origin HEAD', { branch: '2.0.x', protectedBranches: PROTECTED }],
+    ['git push -u origin 2.0.x', onFeature],
+    ['git push origin HEAD', { branch: '3.11', protectedBranches: PROTECTED }],
+    ['git checkout main -- README.md && git merge feat/x', onFeature],
+    ['git checkout main README.md; git merge feat/x', onFeature],
   ]
   for (const [command, context] of allowed) {
     test(`allows: ${command.split('\n')[0]}`, () => {
@@ -51,6 +57,7 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['git merge feat/login', onMain],
     ['git checkout main && git merge feat/login', onFeature],
     ['git switch master; git merge -', onFeature],
+    ['git checkout main -- && git merge feat/login', onFeature],
     ['git rebase feat/login', onMain],
     ['git rebase --onto feat/login x main', onFeature],
     ['git rebase -s ort feat/base master', onFeature],
@@ -64,6 +71,8 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['git push --tags', onFeature],
     ['git push --follow-tags origin feat/login', onFeature],
     ['git push origin v1.4.0', onFeature],
+    ['git push origin 1.4.0-rc.1', onFeature],
+    ['git push origin HEAD:v1.4.0', onFeature],
     ['git push origin refs/tags/v1', onFeature],
     ['git tag v1.4.0', onFeature],
     ['git tag -a v1.4.0 -m "release"', onFeature],
@@ -81,6 +90,11 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['cargo publish', onFeature],
     ['npx semantic-release', onFeature],
     ['docker push registry/app:1.0', onFeature],
+    ['docker image push registry/app:1.0', onFeature],
+    ['docker buildx build --push -t registry/app:1.0 .', onFeature],
+    ['docker build -t registry/app:1.0 --output type=registry .', onFeature],
+    ['podman image push registry/app:1.0', onFeature],
+    ['podman manifest push app:1.0 docker://registry/app:1.0', onFeature],
     ["sh -c 'git push origin main'", onFeature],
     ['cd sub && npm publish', onFeature],
     ['C:\\Program Files\\Git\\cmd\\git.exe push origin main', onFeature],
@@ -97,6 +111,9 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['Invoke-Expression @"\ngit push --tags\n"@', onFeature],
     ["@'\ngit tag v1.4.0\n'@ | iex", onFeature],
     ["gh api graphql -F query=@- <<'EOF'\nmutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }\nEOF", onFeature],
+    ['echo $((1<<2))\ngit push origin main', onFeature],
+    ['cat <<< "x"\ngit push origin main', onFeature],
+    ["python -c 'print(1<<2)'\ngit push origin main", onFeature],
   ]
   for (const [command, context] of denied) {
     test(`denies: ${command.split('\n')[0]}`, () => {
