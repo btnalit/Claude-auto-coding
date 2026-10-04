@@ -170,11 +170,17 @@ export function stageViews(task: SuperviseTask | null, events: readonly Supervis
 const toneColor = (view: StageView): string =>
   view.tone === 'bad' ? TOKENS.rd : view.tone === 'warn' ? TOKENS.ye : view.tone === 'pending' ? TOKENS.line2 : view.color
 
-/** Which side-rail trigger a denial lights. */
+/**
+ * Which side-rail trigger a denial (`<tool>: <command> — <reason>`) lights. Only the reason counts,
+ * without its note in brackets or the branch and tag it names: on main `git merge release-notes`
+ * is a merge, and pushing a protected `release/1.2` is too.
+ */
 export function railOf(denial: string): '合并' | 'tag' | '发版' | '发布' {
-  if (/\btag\b|refs\/tags/.test(denial)) return 'tag'
-  if (/release/.test(denial)) return '发版'
-  if (/发布制品/.test(denial)) return '发布'
+  const at = denial.lastIndexOf(' — ')
+  const reason = (at === -1 ? denial : denial.slice(at + 3)).replace(/（[^）]*）/g, '').replace(/(受保护分支|tag) \S+/g, '$1')
+  if (/发布制品/.test(reason)) return '发布'
+  if (/release|发版/i.test(reason)) return '发版'
+  if (/\btags?\b|refs\/tags/.test(reason)) return 'tag'
   return '合并'
 }
 

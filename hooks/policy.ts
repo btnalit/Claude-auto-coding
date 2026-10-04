@@ -253,13 +253,14 @@ function checkGh(args: string[], context: BoundaryContext, command: string): str
   if (group !== 'api') return undefined
   const text = args.join(' ')
   // A GraphQL body's braces split it off this statement, so the mutation is looked for in the whole command.
-  if (/mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRelease|updateRelease|createRef/.test(command)) {
-    return 'gh api graphql 合并或发版操作'
-  }
+  // The reason names it: the panel's rail tells a merge from a release by it.
+  const mutation = /mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRelease|updateRelease|createRef/.exec(command)
+  if (mutation !== null) return `gh api graphql ${mutation[0]}（合并或发版操作）`
   const isMutation = /(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)(\s|=|$)/.test(text) && !/(-X|--method)[\s=]+GET\b/i.test(text)
   if (!isMutation) return undefined
   if (/\/pulls\/\d+\/merge\b|\/merges\b/.test(text)) return 'gh api 合并 PR'
-  if (/\/releases\b|\/git\/refs\/tags\b|\/git\/tags\b/.test(text)) return 'gh api 发版或写 tag'
+  if (/\/releases\b/.test(text)) return 'gh api 发版'
+  if (/\/git\/refs\/tags\b|\/git\/tags\b/.test(text)) return 'gh api 写 tag'
   const head = /\/git\/refs\/heads\/([\w./-]+)/.exec(text)
   return head !== null && isProtected(head[1], context.protectedBranches) ? `gh api 改写受保护分支 ${head[1]}` : undefined
 }
