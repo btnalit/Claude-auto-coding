@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | P0 | 0 | — |
 | P1 | 5 | 已修复并补测试 |
-| P2 | 9 | 记录，未改 |
+| P2 | 10 | 记录，未改 |
 | P3 | 17 | 记录，未改 |
 
 分级口径：P0 = 数据破坏/安全边界整体失效；P1 = 核心路径上可确定复现的错误行为，或 README §5/§7 明确声称而实现做不到；P2 = 有实际影响但需特定条件、或属于词法边界的覆盖缺口；P3 = 体验、文档、极端输入。
@@ -100,6 +100,11 @@
 - 问题：匹配器只有 `/^(Bash|PowerShell)$/`。会话若接了 GitHub 类 MCP 服务（本机就有 GitHub 连接器），其 merge / release 工具完全在边界之外。
 - 影响：设计边界而非实现错误；README §5 只说「Bash 和 PowerShell 两个工具」，但「监督任务期间禁止合并与发版」的总述会让人以为是全局的。
 - 建议：对 `mcp__*` 工具按名字拒绝 `merge|release|publish|tag` 类操作，或在 README §5 明确写出 MCP 不在边界内。
+
+**P2-10 Worker 回合进行中 stop 后立即 start：新任务接到旧任务的回合**
+- 位置：`hooks/register.tsx:603-608`（`start` 只拒绝 active 的旧任务）
+- 问题：`/supervise stop` 明说「正在运行的这一轮不会被打断」，任务变 `stopped` 后 `start` 立即放行。旧回合结束时新任务处于 `running`，`turn.complete` 把它算作新任务的第 1 轮：`lastAnswer` 是旧任务的回复，决策若为 `continue` 会在已排队的启动 prompt 后面再排一条——与 P1-1 同形的双驱动，入口不同。
+- 建议：`start` 读 `auto-coding.workerTurn`，非空时回复「等这一轮结束再启动」。这会改变 `start` 的契约，本次只记录。
 
 ### policy.ts（词法边界的覆盖缺口，均已用探针实证）
 

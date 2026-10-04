@@ -140,7 +140,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 **拒绝**
 
 - 合并：`gh pr merge`；在受保护分支上 `git merge` / `git rebase`（会跟踪同一条命令里的 `checkout`/`switch`）；直推受保护分支（`git push origin main`、`HEAD:main`、当前分支是 main 时的裸 `git push`、删除受保护分支）；`git branch -f/-D/-M` 或 `git update-ref` 改写受保护分支；`gh api` 合并 PR / 改写受保护分支
-- 发版：创建/删除 tag；推 tag（`--tags`、`--follow-tags`、`refs/tags/`、形如 `v1.2.3` 的 refspec）；`--all` / `--mirror`；`gh release create/upload/edit/delete`；`gh api` 发版；`npm/pnpm/yarn/bun publish`、`npm version <x>`、`cargo/poetry/uv publish`、`twine upload`、`gem push`、`dotnet nuget push`、`docker/podman push`、`vsce/ovsx publish`、`lerna publish`、`changeset publish`、`goreleaser release`、`semantic-release`、`release-it`
+- 发版：创建/删除 tag；推 tag（`--tags`、`--follow-tags`、`refs/tags/`、`tag <名>`、形如 `v1.2.3` 的 refspec）；`--all` / `--mirror`；`gh release create/upload/edit/delete`；`gh api` 发版；`npm/pnpm/yarn/bun publish`、`npm version <x>`、`cargo/poetry/uv publish`、`twine upload`、`gem push`、`dotnet nuget push`、`docker/podman push`、`vsce/ovsx publish`、`lerna publish`、`changeset publish`、`goreleaser release`、`semantic-release`、`release-it`
 
 **放行**：推功能分支（含 `--force-with-lease`）、`gh pr create/view/checks`、在功能分支上 merge/rebase main、在 main 上 `git pull`，以及一切本地开发操作（编辑、测试、提交）。
 
