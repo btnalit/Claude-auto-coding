@@ -374,12 +374,17 @@ let stepsInFlight = 0
 
 // Settles once the main loop's latest turn end is written down. A reload starts it settled.
 let turnWritten: Promise<void> = Promise.resolve()
+let isTurnEnding = false
 
 /** Marks a turn end as being written down; the function it returns says it is. */
 function writing(): () => void {
   let done = () => {}
+  isTurnEnding = true
   turnWritten = new Promise<void>(resolve => {
-    done = resolve
+    done = () => {
+      isTurnEnding = false
+      resolve()
+    }
   })
   return done
 }
@@ -742,8 +747,9 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   if (existing !== null && isActive(existing.status)) {
     return { text: `已有监督任务 ${existing.id}（${LABEL[existing.status]}）。先 /supervise stop。` }
   }
-  // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn.
-  if ((await read($, WORKER_TURN)) !== null) {
+  // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn,
+  // and so would one that has dropped its marker but not yet read the task.
+  if ((await read($, WORKER_TURN)) !== null || isTurnEnding) {
     return { text: '会话里还有一轮在进行（正在跑的回合不会被打断）。等这一轮结束后再 /supervise start。' }
   }
   let cwd: string
