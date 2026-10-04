@@ -85,13 +85,13 @@
 - 问题：回合在 `paused` 时结束（P1-1 修复覆盖的是「回合还没结束就恢复」，这里是「结束后才恢复」），`turns` 不加、`lastAnswer` 停在上一轮。
 - 影响：决策提示里的「Worker's last reply」和 Reviewer 证据里的「Worker's final report」是上一轮的话；反复暂停可绕过 `maxTurns`。
 - 建议：暂停时的主循环回合只记录 `lastAnswer`（不改状态、不 bump 语义）；是否计入轮次属于口径问题，需要定：用户自己接管的回合算不算 Worker 回合。
-- **状态：已修（`0e64dd7`）**。`notePausedTurn`（`hooks/register.tsx:389-408`）：暂停期间结束的主循环回合 `turns + 1`，以 `answer` 结束时写入 `lastAnswer`，状态不变；不递增 `seq`（不是迁移），已在路上的 resume 照常生效；面板日志不写（面板只在任务进行中动），审计日志记 `turn_while_paused`。**口径决定**：任务期间主循环结束的每一轮都计入 `turns`，包括暂停期间你自己发起的回合——引擎的 `turn.complete` 不说明回合由谁发起，预算是这个会话回合数的上限；README §4 的 `maxTurns` 说明随之更新。测试「a turn that ends while paused counts, and its reply is what the decision reads」。
+- **状态：已修（`0e64dd7`）**。`notePausedTurn`（`hooks/register.tsx:389-408`）：暂停期间结束的主循环回合 `turns + 1`，以 `answer` 结束时写入 `lastAnswer`，状态不变；不递增 `seq`（不是迁移），已在路上的 resume 照常生效；面板日志不写（面板只在任务进行中动），审计日志记 `turn_while_paused`。**口径决定**（合并时由主会话改定，独立 Review 提示需人确认）：只有暂停时在途的那一轮 Worker 回合计入 `turns`——进入暂停时记下在途回合的 id（`pausedOnTurn`），结束的回合 id 与之相同才计数；你接管期间自己发起的回合不计数（`maxTurns` 约束的是无人值守部分），但它们的回复同样写入 `lastAnswer`。README §4 的 `maxTurns` 说明随之更新。测试「a turn that ends while paused counts, and its reply is what the decision reads」。
 
 **P2-3 验收中按 Esc 可能被当成检查失败、消耗修复轮**
 - 位置：`hooks/register.tsx:426-432`
 - 问题：`runChecks` 把 `$.process.run` 的任何 rejection 都记成 `exitCode -1` 的失败，随后 `repair()` 发出新的 Worker 回合。README §7 说「在验收 / Review 中按 Esc … 进入 paused」。类型文档只写了 `process.run`「无法启动或超时时 reject」，没说派发被放弃时的行为——**未实测，属推断**。
 - 建议：把 `turn.complete` 的 `next.signal` 传到 `runChecks`，`signal.aborted` 时转 `paused` 而不是 repair；先在真实引擎里验证 Esc 时 `process.run` 的行为。
-- **状态：已修（`0061a86`）**。`next.signal` 经 `onWorkerTurn → decide → verify` 传入；检查返回时若信号已中止，任务转 `paused`（「验收被中断；/supervise resume 重新验收」），本次检查结果不记录、不进修复轮（`hooks/register.tsx:461-471`）。不论 `process.run` 在真实引擎里被放弃时是 reject 还是照常跑完，都不会再排修复轮——后一种情况修复前同样会在检查失败时排一轮新 Worker 回合。测试「Esc during the checks pauses the task instead of sending a repair turn」：prepend 层的内联插件在检查挂起时抢先结束 `turn.complete` 派发（探针确认这会让下层 hook 的 `next.signal` 中止，被挂起的 `process.run` 仍正常返回）；修复前任务进入修复轮，修复后为已暂停且只提交过 1 条 prompt。未在真实引擎里按 Esc 实测。
+- **状态：已修（`0061a86`）**。`next.signal` 经 `onWorkerTurn → decide → verify` 传入；检查返回时若信号已中止，任务转 `paused`（「验收被中断；/supervise resume 重新验收」），本次检查结果不记录、不进修复轮（`hooks/register.tsx:461-471`）。不论 `process.run` 在真实引擎里被放弃时是 reject 还是照常跑完，都不会再排修复轮——后一种情况修复前同样会在检查失败时排一轮新 Worker 回合。测试「Esc during the checks pauses the task instead of sending a repair turn」：prepend 层的内联插件在检查挂起时抢先结束 `turn.complete` 派发（探针确认这会让下层 hook 的 `next.signal` 中止，被挂起的 `process.run` 仍正常返回）；修复前任务进入修复轮，修复后为已暂停且只提交过 1 条 prompt。合并后在真实引擎（2.1.289）`-p` 跑完整任务（创建文件并提交 → 决策 → 验收 → Review pass → completed），未误判为中断，即会话正常结束不会中止 `turn.complete` 的 `next.signal`；按 Esc 的路径仍未实测。
 
 **P2-4 非 ASCII 文件名的未跟踪文件对 Reviewer 静默消失**
 - 位置：`hooks/register.tsx:461`、`:474-479`，`hooks/logic.ts:179-184`
@@ -179,6 +179,11 @@
 - **P3-17** `hooks/panel.tsx:406`、`:465`、`:496`、`:500`：目标和说明原样绘制，含换行时（粘贴的多行任务、模型给出的多行理由）状态条会超出 AbovePrompt 的 `maxRows`、面板行数变化；`Log` 的 key（`:377`）按下标生成，事件满 40 条后不再标识同一事件，`Runs`（`:189`）的子元素没有 key。均为显示问题。
 
 ---
+
+### 第二轮独立 Review 补充（未修，留给 P3 处理）
+
+- **P3-18** `hooks/register.tsx`（`turn.complete` 处理）：处理器在 `next(e)` 之前清除回合标记；这段窗口里对已暂停任务的 resume 会跳过等待、开始决策并把状态改离 `paused`，随后该回合走到 `notePausedTurn` 时状态已不匹配，这一轮的回复不会写入 `lastAnswer`。可选：记录这个竞态，或让 resume 路径取到刚结束那一轮的回复。
+- **P3-19** `hooks/register.tsx`（`session.start` 重跑被打断的步骤）：热重载后 1 秒才重跑并计入 `stepsInFlight`；这 1 秒内的 `/supervise resume` 看到在途数为 0，会再起一份同样的步骤。seq 守卫会丢弃其中一份结果，但检查或 Reviewer 会多跑一次。可选：在排定定时器时就计入 `stepsInFlight`。
 
 ## 验证
 

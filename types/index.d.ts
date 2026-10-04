@@ -70,6 +70,8 @@ export type SuperviseTask = {
   lastChecks?: SuperviseCheck[]
   lastReview?: SuperviseReview
   note?: string
+  /** The turn in flight when the task was paused: the Worker's own, the one turn after the pause that counts. */
+  pausedOnTurn?: string
 }
 
 /** Who an event in the panel's session log is about; each has a colour of its own. */

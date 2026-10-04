@@ -15,7 +15,7 @@
     "maxTurns": {
       "type": "number",
       "title": "Max turns",
-      "description": "Turns per task: every main-loop turn that ends during it, repair turns and turns that end while paused included; past it the task is verified once and ends.",
+      "description": "Worker turns per task, repair turns and the turn a pause let finish included; turns you start while it is paused do not count. Past it the task is verified once and ends.",
       "default": 40
     },
     "maxRepairRounds": {

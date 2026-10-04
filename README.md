@@ -146,7 +146,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 | 选项 | 默认 | 含义 |
 | --- | --- | --- |
 | `reviewerModel` | `opus` | 独立 Review 用的模型（opus / sonnet / haiku） |
-| `maxTurns` | 40 | 每个任务的回合上限：主循环在任务期间结束的每一轮都算，含修复轮，也含暂停期间结束的回合（暂停让它跑完的那一轮、你接管时自己发起的回合） |
+| `maxTurns` | 40 | 每个任务的 Worker 回合上限：含修复轮，也含暂停时正在跑、随后跑完的那一轮；你接管期间自己发起的回合不算（它们的回复仍是恢复时决策读到的最新回复） |
 | `maxRepairRounds` | 3 | 修复轮上限，超过即 `blocked` |
 | `deadlineMinutes` | 240 | 墙钟预算 |
 | `protectedBranches` | `main,master` | 逗号分隔，`release/*` 这类前缀通配可用 |
@@ -175,7 +175,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 - 每次状态迁移递增 `seq`；异步步骤写回前核对 `seq`，被暂停/停止/重载超越的结果直接丢弃
 - `workerTurn` 记录主循环在途回合：Worker 这一轮还没结束就 resume 时，任务回到 `running`，等这一轮结束再决策，不会读半轮对话或排第二条指令；有回合在途时 `/supervise start` 会拒绝（`stop` 不打断正在跑的那一轮，等它结束再启动，免得新任务把旧回合当成自己的第 1 轮）。标记在 `turn.complete` 一开始就清除，`session.start`（首次加载或回合结束后的重载）和 `session.end` 也会清掉残留，不会让 resume 或 start 等一个永远不来的回合结束
 - 热重载：`session.start` 发现 `deciding/verifying/reviewing` 会自动重跑该步骤；`/supervise resume` 对这三个状态只在本环境没有在途步骤（即确实被重载打断）时才重跑，步骤还在跑时不会再并行跑一遍
-- 审计日志：`<git-dir>/auto-coding/<id>.jsonl`，记录 `task_started`、`status`、`decision`、`checks`、`review`、`worker_input`、`boundary_denied`、`turn_while_paused`（暂停期间结束的回合：计入轮次，其回复作为 resume 时决策读到的"最后回复"，状态不变）
+- 审计日志：`<git-dir>/auto-coding/<id>.jsonl`，记录 `task_started`、`status`、`decision`、`checks`、`review`、`worker_input`、`boundary_denied`、`turn_while_paused`（暂停期间结束的回合：只有暂停时在途的 Worker 回合计入轮次；其回复都作为 resume 时决策读到的"最后回复"，状态不变）
 
 ## 7. 已知限制与取舍
 
@@ -198,7 +198,7 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 ```
 
 - `tests/policy.test.ts`：边界放行/拒绝两侧 79 条用例
-- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、残留的回合标记在 session.start / session.end / 底层 turn.complete 失败后被清掉、有回合在途时 start 等它结束、步骤仍在运行时 resume 不重跑、暂停期间结束的回合计数并更新最后回复、验收中按 Esc（prepend 层插件抢先结束派发）进入 paused 而非修复轮、非 ASCII 及读不到的未跟踪文件仍列给 Reviewer、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
+- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、残留的回合标记在 session.start / session.end / 底层 turn.complete 失败后被清掉、有回合在途时 start 等它结束、步骤仍在运行时 resume 不重跑、暂停时在途的 Worker 回合计数、你接管后发起的回合不计数但都更新最后回复、验收中按 Esc（prepend 层插件抢先结束派发）进入 paused 而非修复轮、非 ASCII 及读不到的未跟踪文件仍列给 Reviewer、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
 已在真实引擎（2.1.289，Windows）实测：

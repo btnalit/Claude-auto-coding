@@ -29,7 +29,7 @@ const WORKING: ReadonlySet<SuperviseStatus> = new Set(['running', 'deciding', 'v
 export const isWorking = (status: SuperviseStatus): boolean => WORKING.has(status)
 export const isActive = (status: SuperviseStatus): boolean => WORKING.has(status) || status === 'paused'
 
-export type TurnEnd = { reason: 'answer' | 'aborted' | 'refusal' | 'error'; answer: string; refusal?: string }
+export type TurnEnd = { reason: 'answer' | 'aborted' | 'refusal' | 'error'; answer: string; refusal?: string; turnId?: string }
 
 /** `pause` is never the model's: it is what a decision cut short by Esc or a timeout becomes. */
 export type Decision =

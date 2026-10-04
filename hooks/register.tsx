@@ -158,6 +158,7 @@ export const register: Register = (on, options) => {
     const end: TurnEnd = {
       reason: e.reason,
       answer: e.answer,
+      turnId: e.turnId,
       refusal: e.reason === 'refusal' ? (e.refusal.explanation ?? e.refusal.category ?? undefined) : undefined,
     }
     if (task.status === 'paused') {
@@ -267,6 +268,10 @@ function detach($: Engine, step: Promise<unknown>): void {
 }
 
 async function patch($: Engine, task: SuperviseTask, change: Partial<SuperviseTask>): Promise<SuperviseTask | undefined> {
+  // Entering a pause remembers the turn in flight: the Worker's turn, which counts when it ends; the person's own turns do not.
+  if (change.status === 'paused' && task.status !== 'paused') {
+    change = { ...change, pausedOnTurn: (await read($, WORKER_TURN)) ?? undefined }
+  }
   let applied: SuperviseTask | undefined
   await update($, TASK, current => {
     applied = undefined
@@ -396,13 +401,15 @@ async function notePausedTurn($: Engine, task: SuperviseTask, end: TurnEnd): Pro
   await update($, TASK, current => {
     noted = undefined
     if (current === null || current.id !== task.id || current.status !== 'paused') return current
-    noted = { ...current, turns: current.turns + 1 }
+    // Only the Worker's turn that the pause let finish counts: turns a person starts while paused are attended work.
+    const isWorkersTurn = end.turnId !== undefined && end.turnId === current.pausedOnTurn
+    noted = { ...current, turns: isWorkersTurn ? current.turns + 1 : current.turns }
     if (end.reason === 'answer') noted.lastAnswer = tail(end.answer, 4000)
     return noted
   })
   if (noted === undefined) return
   $.ui.status(statusLine(noted))
-  void log($, noted, 'turn_while_paused', { reason: end.reason, turns: noted.turns })
+  void log($, noted, 'turn_while_paused', { reason: end.reason, turns: noted.turns, isWorkersTurn: noted.turns !== task.turns })
 }
 
 /** Picks up a step a reload cut off, or a paused task being resumed. */

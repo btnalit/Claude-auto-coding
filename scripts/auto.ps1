@@ -108,6 +108,12 @@ if ($LASTEXITCODE -eq 0 -and $pluginTop -and (Same-Path ($pluginTop | Select-Obj
     }
   }
   $pluginDir = $snapshot
+  # Snapshots pile up one per commit. One a day old serves no running task (a task's deadline is hours),
+  # so those go, with any archive a failed unpack left; the one this task loads stays.
+  $cutoff = (Get-Date).AddDays(-1)
+  Get-ChildItem -Path $env:TEMP -Filter 'auto-coding-plugin-*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $snapshot -and $_.LastWriteTime -lt $cutoff } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # 4. Settings for this session alone: the worktree starts from the local HEAD. A file, because
