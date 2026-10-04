@@ -58,7 +58,10 @@ export function checkCommand(command: string, context: BoundaryContext): string 
   return undefined
 }
 
-/** Whether checking the command needs the current branch (a push, merge, rebase or checkout). */
+/**
+ * Whether checking the command needs the current branch: a push, merge or rebase. A checkout or
+ * switch before them in the same command is followed by `checkCommand` itself.
+ */
 export function needsBranch(command: string): boolean {
   return /\bgit\b/.test(command) && /\b(push|merge|rebase)\b/.test(command)
 }
@@ -258,5 +261,10 @@ function switchedTo(tokens: string[]): string | undefined {
   if (git === undefined || (git.sub !== 'checkout' && git.sub !== 'switch')) return undefined
   const create = git.rest.findIndex(a => ['-b', '-B', '-c', '-C', '--orphan'].includes(a))
   if (create !== -1) return git.rest[create + 1]
-  return git.rest.find(a => !a.startsWith('-') && a !== '--')
+  // `git checkout main -- README.md` (or `main README.md`) restores files and stays on the branch;
+  // a bare trailing `--` (`git checkout main --`) still switches.
+  const dashes = git.rest.indexOf('--')
+  const names = (dashes === -1 ? git.rest : git.rest.slice(0, dashes)).filter(a => !a.startsWith('-'))
+  const hasPaths = names.length > 1 || (dashes !== -1 && dashes < git.rest.length - 1)
+  return git.sub === 'checkout' && hasPaths ? undefined : names[0]
 }

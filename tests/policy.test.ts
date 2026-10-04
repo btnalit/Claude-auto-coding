@@ -39,6 +39,8 @@ describe('allowed: push, PR and ordinary work', () => {
     ['git push origin HEAD', { branch: '2.0.x', protectedBranches: PROTECTED }],
     ['git push -u origin 2.0.x', onFeature],
     ['git push origin HEAD', { branch: '3.11', protectedBranches: PROTECTED }],
+    ['git checkout main -- README.md && git merge feat/x', onFeature],
+    ['git checkout main README.md; git merge feat/x', onFeature],
   ]
   for (const [command, context] of allowed) {
     test(`allows: ${command.split('\n')[0]}`, () => {
@@ -54,6 +56,7 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['git merge feat/login', onMain],
     ['git checkout main && git merge feat/login', onFeature],
     ['git switch master; git merge -', onFeature],
+    ['git checkout main -- && git merge feat/login', onFeature],
     ['git rebase feat/login', onMain],
     ['git rebase --onto feat/login x main', onFeature],
     ['git rebase -s ort feat/base master', onFeature],
