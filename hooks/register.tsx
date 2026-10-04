@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, ProcessRunResult, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, ProcessRunResult, Register, Timer } from 'claude-code'
 
-import type { SuperviseCheck, SuperviseReview, SuperviseStatus, SuperviseTask } from '../types'
+import type { SuperviseCheck, SuperviseEvent, SuperviseReview, SuperviseRole, SuperviseStatus, SuperviseTask } from '../types'
 import {
   CHECK_TIMEOUT_MS,
   DECISION_RETRY,
@@ -30,6 +30,8 @@ import {
   untrackedPaths,
 } from './logic'
 import type { Decision, TurnEnd } from './logic'
+import { TICK_MS, drawBand, drawPanel } from './panel'
+import type { PanelActions } from './panel'
 import { checkCommand, isProtected, needsBranch } from './policy'
 
 // This session's main loop is the Worker; this module is its Supervisor.
@@ -41,20 +43,10 @@ type Engine = EngineInterface
 const TASK = atom({ plugin: 'auto-coding', key: 'task' } as const, null)
 const BAND_HIDDEN = atom({ plugin: 'auto-coding', key: 'isBandHidden' } as const, false)
 const DENIALS = atom({ plugin: 'auto-coding', key: 'denials' } as const, [])
+const EVENTS = atom({ plugin: 'auto-coding', key: 'events' } as const, [])
 const PROJECT_CONFIG = '.claude/auto-coding.json'
-
-const COLOR: Record<SuperviseStatus, string> = {
-  running: 'cyan',
-  deciding: 'cyan',
-  verifying: 'magenta',
-  reviewing: 'magenta',
-  publishing: 'blue',
-  paused: 'yellow',
-  completed: 'green',
-  blocked: 'yellow',
-  failed: 'red',
-  stopped: 'gray',
-}
+const PANE = 'auto-coding'
+const MAX_EVENTS = 40
 
 type Settings = {
   reviewerModel: string
@@ -87,12 +79,13 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'supervise',
-      description: '无人值守开发监督：start <任务> | status | pause | resume | stop | clear',
-      argumentHint: 'start <任务> | status | pause | resume | stop | clear',
+      description: '无人值守开发监督：start <任务> | panel | status | pause | resume | stop | clear',
+      argumentHint: 'start <任务> | panel | status | pause | resume | stop | clear',
     })
     const task = await read($, TASK)
     if (task !== null) {
       $.ui.status(statusLine(task))
+      if (isWorking(task.status)) animate($)
       // A reload drops the step that was running; pick it up again.
       if (task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing') {
         $.clock.after(1_000, () => detach($, resumeStep($, task)))
@@ -107,6 +100,10 @@ export const register: Register = (on, options) => {
     const task = await read($, TASK)
     if (verb === '' || verb === 'status') return { text: describe(task) }
     if (verb === 'help') return { text: usage() }
+    if (verb === 'panel') {
+      const opened = await $.ui.open({ id: PANE, title: 'auto-coding' })
+      return { text: opened.isPlaced ? '已打开 auto-coding 面板。' : `面板暂未显示：${opened.reason}` }
+    }
     if (verb === 'start') return start($, settings, args.slice(verb.length).trim())
     if (!['pause', 'resume', 'stop', 'clear'].includes(verb)) return start($, settings, args)
     if (task === null) return { text: `没有监督任务。\n${usage()}` }
@@ -127,8 +124,7 @@ export const register: Register = (on, options) => {
       return { text: `已停止 ${task.id}。正在运行的这一轮不会被打断；硬边界随任务一起解除。` }
     }
     if (isActive(task.status)) return { text: `任务 ${task.id} 仍在进行，先 /supervise stop。` }
-    await update($, TASK, () => null)
-    $.ui.status(undefined)
+    await clearTask($)
     return { text: '已清除。' }
   })
 
@@ -175,6 +171,7 @@ export const register: Register = (on, options) => {
     const tool = String(e.tool)
     void log($, task, 'boundary_denied', { tool, command: command.slice(0, 500), reason })
     await update($, DENIALS, list => [...list, `${tool}: ${command.slice(0, 300)} — ${reason}`].slice(-20))
+    await record($, 'boundary', `拦截 ${command.slice(0, 120)}（${reason}）`, 'warn')
     return {
       deny:
         `[auto-coding] 硬边界：监督任务期间禁止合并与发版（${reason}）。` +
@@ -202,37 +199,21 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const task = await read($, TASK)
     if (task === null || e.props.hasSurvey || (await read($, BAND_HIDDEN))) return next(e)
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const buttons = []
-    if (task.status === 'paused') {
-      buttons.push(<Button key="resume" label="恢复" variant="primary" onPress={() => $.clock.after(0, () => detach($, resumeFromBand($)))} />)
-    } else if (isWorking(task.status)) {
-      buttons.push(<Button key="pause" label="暂停" onPress={() => detach($, pauseFromBand($))} />)
-    }
-    if (isActive(task.status)) {
-      buttons.push(<Button key="stop" label="停止" onPress={() => detach($, stopFromBand($))} />)
-    } else {
-      buttons.push(<Button key="clear" label="清除" onPress={() => void update($, TASK, () => null)} />)
-    }
-    buttons.push(<Button key="hide" label="隐藏" plain onPress={() => void update($, BAND_HIDDEN, () => true)} />)
-    return (
-      <Box flexDirection="column">
-        <Box>
-          <Text color={COLOR[task.status]} bold>
-            ● auto-coding {task.id} {LABEL[task.status]}
-          </Text>
-          <Text dimColor>
-            {'  '}轮次 {task.turns}/{task.maxTurns} · 修复 {task.repairRound}/{task.maxRepairRounds} · {task.branch}
-          </Text>
-        </Box>
-        <Text dimColor wrap="truncate-end">
-          {task.goal}
-        </Text>
-        {task.note === undefined ? undefined : <Text wrap="truncate-end">{task.note}</Text>}
-        <Box>{buttons}</Box>
-      </Box>
-    )
+    const model = { task, events: [], denials: [], now: await $.clock.now(), columns: e.props.bodyColumns, rows: 0, actions: actionsFor($) }
+    return drawBand($.ui.resolve(e), model) ?? next(e)
   })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) =>
+    drawPanel($.ui.resolve(e), {
+      task: await read($, TASK),
+      events: await read($, EVENTS),
+      denials: await read($, DENIALS),
+      now: await $.clock.now(),
+      columns: e.props.bodyColumns,
+      rows: e.props.scroll.bodyRows,
+      actions: actionsFor($),
+    }),
+  )
 }
 
 // ---------------------------------------------------------------- state
@@ -258,10 +239,50 @@ async function patch($: Engine, task: SuperviseTask, change: Partial<SuperviseTa
   })
   if (applied === undefined) return undefined
   $.ui.status(statusLine(applied))
+  if (isWorking(applied.status)) animate($)
   if (change.status !== undefined && change.status !== task.status) {
     void log($, applied, 'status', { from: task.status, to: applied.status, note: applied.note })
+    if (!isWorking(applied.status)) {
+      const tone = applied.status === 'completed' ? 'ok' : applied.status === 'failed' ? 'bad' : applied.status === 'stopped' ? undefined : 'warn'
+      await record($, 'task', `${LABEL[applied.status]}${applied.note === undefined ? '' : `：${applied.note}`}`, tone)
+    }
   }
   return applied
+}
+
+/** Adds a row to the panel's session log. */
+async function record($: Engine, who: SuperviseRole, text: string, tone?: SuperviseEvent['tone']): Promise<void> {
+  const event: SuperviseEvent = { at: await $.clock.now(), who, text: tail(text, 300) }
+  if (tone !== undefined) event.tone = tone
+  await update($, EVENTS, list => [...list, event].slice(-MAX_EVENTS))
+}
+
+let ticker: Timer | undefined
+
+/** Redraws the band and the panel a few times a second, only while the task is working. */
+function animate($: Engine): void {
+  if (ticker !== undefined) return
+  ticker = $.clock.every(TICK_MS, () => detach($, tick($)))
+}
+
+async function tick($: Engine): Promise<void> {
+  const task = await read($, TASK)
+  if (task === null || !isWorking(task.status)) {
+    ticker?.cancel()
+    ticker = undefined
+  }
+  $.ui.invalidate('ui.render')
+}
+
+function actionsFor($: Engine): PanelActions {
+  return {
+    pause: () => detach($, pauseFromBand($)),
+    resume: () => void $.clock.after(0, () => detach($, resumeFromBand($))),
+    stop: () => detach($, stopFromBand($)),
+    clear: () => detach($, clearTask($)),
+    open: () => detach($, $.ui.open({ id: PANE, title: 'auto-coding' })),
+    hide: () => detach($, update($, BAND_HIDDEN, () => true)),
+  }
 }
 
 async function finish($: Engine, task: SuperviseTask, status: SuperviseStatus, note: string): Promise<void> {
@@ -295,6 +316,7 @@ function log($: Engine, task: SuperviseTask, type: string, detail?: unknown): Pr
 async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promise<void> {
   if (task.status === 'publishing') return finishPublish($, task)
   const turns = task.turns + 1
+  await record($, 'worker', `第 ${turns} 轮结束${end.reason === 'answer' ? '' : `（${end.reason}）`}`, end.reason === 'answer' ? undefined : 'warn')
   if (end.reason === 'aborted') {
     await patch($, task, { status: 'paused', turns, note: '你中断了这一轮；/supervise resume 恢复自动监督' })
     return
@@ -326,6 +348,7 @@ async function decide($: Engine, task: SuperviseTask): Promise<void> {
   if (!hasBudget(task, now)) return verify($, task, '轮次或时间预算已用尽，做最终验收')
   const decision = await askDecision($, task, now)
   void log($, task, 'decision', decision)
+  await record($, 'decide', `${decision.action}：${decision.action === 'continue' ? decision.message : decision.reason}`, decision.action === 'park' ? 'warn' : undefined)
   if (decision.action === 'continue') return send($, task, 'running', decision.message)
   if (decision.action === 'park') return finish($, task, 'blocked', `决策挂起：${decision.reason}`)
   if (decision.action === 'pause') {
@@ -363,6 +386,12 @@ async function verify($: Engine, task: SuperviseTask, note?: string): Promise<vo
   const checked = await patch($, verifying, { lastChecks: checks })
   if (checked === undefined) return
   const failed = checks.filter(check => !check.isPassed)
+  await record(
+    $,
+    'verify',
+    failed.length === 0 ? `检查 ${checks.length}/${checks.length} 通过` : failed.map(c => `${c.id} 失败（exit ${c.exitCode}）`).join('、'),
+    failed.length === 0 ? 'ok' : 'bad',
+  )
   if (failed.length > 0) {
     return repair($, checked, checksFeedback(failed), `验收检查未通过：${failed.map(check => check.id).join('、')}`)
   }
@@ -393,6 +422,7 @@ async function review($: Engine, task: SuperviseTask): Promise<void> {
   const observed = supervisorObservations(reviewing, await read($, DENIALS))
   const result = await askReviewer($, reviewing, `${await collectEvidence($, reviewing)}\n\n${observed}`)
   void log($, reviewing, 'review', result)
+  if (!('error' in result)) await record($, 'review', `${result.verdict}：${result.summary}`, result.verdict === 'pass' ? 'ok' : 'warn')
   if ('error' in result && result.isInterrupted === true) {
     await patch($, reviewing, { status: 'paused', note: 'Review 被中断或超时；/supervise resume 重新验收' })
     return
@@ -481,6 +511,7 @@ async function repair($: Engine, task: SuperviseTask, feedback: string, reason: 
   const round = task.repairRound + 1
   const repairing = await patch($, task, { repairRound: round, note: reason })
   if (repairing === undefined) return
+  await record($, 'worker', `修复轮 ${round}/${task.maxRepairRounds}：${reason}`, 'warn')
   const text = `验收未通过，第 ${round}/${task.maxRepairRounds} 轮修复。\n\n${feedback}\n\n修复后重新运行相关检查并本地提交，最后简述改了什么、怎么验证的。`
   return send($, repairing, 'running', text)
 }
@@ -542,6 +573,15 @@ async function stopFromBand($: Engine): Promise<void> {
   if (task !== null && isActive(task.status)) await finish($, task, 'stopped', '手动停止')
 }
 
+async function clearTask($: Engine): Promise<void> {
+  const task = await read($, TASK)
+  if (task === null || isActive(task.status)) return
+  await update($, TASK, () => null)
+  await update($, EVENTS, () => [])
+  await update($, DENIALS, () => [])
+  $.ui.status(undefined)
+}
+
 async function start($: Engine, settings: Settings, goal: string): Promise<{ text: string }> {
   if (goal === '') return { text: usage() }
   const existing = await read($, TASK)
@@ -587,8 +627,17 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   await update($, TASK, () => task)
   await update($, BAND_HIDDEN, () => false)
   await update($, DENIALS, () => [])
+  await update($, EVENTS, () => [])
+  await record($, 'task', `启动：${goal}`)
   $.ui.status(statusLine(task))
+  animate($)
   void log($, task, 'task_started', { goal, baseline: task.baseline, branch: task.branch, checks: task.checks, settings })
+  // The panel is a view of the task: a surface that cannot place it does not stop the task.
+  try {
+    await $.ui.open({ id: PANE, title: 'auto-coding' })
+  } catch (error) {
+    $.ui.log(`auto-coding: 面板未打开：${errorText(error)}`)
+  }
   // A prompt submitted from inside command.run would wait on this very dispatch.
   $.clock.after(0, () => {
     $.prompt.submit({ text: `[auto-coding ${task.id}] ${startPrompt(task)}` }).catch(error => {
@@ -666,6 +715,7 @@ function usage(): string {
   return [
     '用法：',
     '  /supervise start <任务>   启动（或直接 /supervise <任务>）',
+    '  /supervise panel          打开实时面板',
     '  /supervise status         查看状态',
     '  /supervise pause|resume   暂停 / 恢复自动推进',
     '  /supervise stop           停止，解除硬边界',

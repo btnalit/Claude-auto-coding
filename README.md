@@ -84,6 +84,32 @@ claude -p --plugin-dir D:/Claude-auto-coding "/supervise start <任务>"
 
 监督步骤在 `turn.complete` 内执行完才放行，所以 `-p` 会话会一直跑到任务进入终态。
 
+### 实时面板
+
+`/supervise start` 会同时打开 auto-coding 面板（全屏布局下停靠在侧边，主屏布局下内联），之后随时可用 `/supervise panel` 或状态条上的 **面板** 按钮重新打开。视觉取自 [live-panel-skill](https://github.com/ythx-101/live-panel-skill) 的 terminal-dark 主题，规则见 `design-system/auto-coding/MASTER.md`：
+
+```
+          AUTO-CODING  ·  T261004140124  ·  ◐ Worker 工作中
+══════════════════════════════════════════════════════════════════
+     ■ worker   ■ decide   ■ verify   ■ review   ■ boundary
+任务  给 parser 加上空输入处理，并补测试
+─●·─▶┆ Worker ┆────▶┆  决策  ┆────▶┆  验收  ┆────▶┆ Review ┆────▶┆  完成  ┆
+     ┆◐ 第 2 轮┆     ┆ verify ┆     ┆ 1/2 ✗  ┆     ┆   —    ┆     ┆   —    ┆
+┆ 预算 · 验收            已运行 6m · 剩余 3h54m ┆
+┆ 轮次  ██░░░░░░░░░░░░░░░░░░  2/40              ┆
+┆ 检查  diff-check ✓  check-1 ✗ exit 1          ┆
+┆ 边界 · on guard  ◇ 合并  ◆ tag  ◇ 发版  ◇ 发布  ┆
+│ session log                                  │
+│ 14:05:37  verify   check-1 失败（exit 1）      │
+│ 14:05:38  worker   修复轮 1/3：验收检查未通过   │  ← 最新一行高亮
+~/repo $ /supervise start 给 parser 加上空输入处理… █
+turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] [停止]
+```
+
+- 流水线高亮当前阶段；修复轮里 Worker 重新变为当前阶段，而把它打回来的验收/Review 保持红/黄。
+- 光点、spinner、光标**只在任务进行中**动（200ms 一帧）；暂停和终态完全静止——面板不会在什么都没发生时假装忙碌。
+- session log 由每一步自己写入（worker 回合、决策、检查、Review、修复轮、边界拦截、终态），和审计日志同源。
+
 ### 项目验收命令
 
 在仓库里放 `.claude/auto-coding.json`（示例见 `examples/auto-coding.json`）：
@@ -148,7 +174,7 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 ```
 
 - `tests/policy.test.ts`：边界放行/拒绝两侧 55 条用例
-- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、边界只在任务期间生效
+- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
 已在真实引擎（2.1.289，Windows，`-p`）实测：一次通过闭环、检查失败 → 修复轮 → 通过、`git tag` 经 PowerShell 被拦截且 Reviewer 据拦截记录给出 `human`。
@@ -159,11 +185,14 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 .claude-plugin/plugin.json   manifest + userConfig
 hooks/hooks.json             { "modules": ["./register.tsx"] }
 hooks/register.tsx           所有 hook 与用到 $ 的状态机步骤（$ 不能跨 import 传递）
+hooks/panel.tsx              纯绘制：实时面板与状态条（拿到元素表和数据模型，不碰 $）
 hooks/logic.ts               纯函数：标签、预算、提示词、JSON 解析
 hooks/policy.ts              纯函数：合并/发版边界
 types/index.d.ts             $.state 契约
 tests/                       claude plugin test 用例
 examples/auto-coding.json    项目验收配置示例
+.claude/auto-coding.json     本仓库自己的验收命令（validate + test）
+design-system/auto-coding/   面板的配色 token 与动效规则
 ```
 
 ## 10. 后续可做

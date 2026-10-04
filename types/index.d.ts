@@ -72,9 +72,20 @@ export type SuperviseTask = {
   note?: string
 }
 
+/** Who an event in the panel's session log is about; each has a colour of its own. */
+export type SuperviseRole = 'worker' | 'decide' | 'verify' | 'review' | 'boundary' | 'task'
+
+/** One row of the panel's session log, written by the step that caused it. */
+export type SuperviseEvent = {
+  at: number
+  who: SuperviseRole
+  text: string
+  tone?: 'ok' | 'warn' | 'bad'
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    /** `denials`: what the boundary refused during the current task, newest last. */
-    'auto-coding': { task: SuperviseTask | null; isBandHidden: boolean; denials: string[] }
+    /** `denials`: what the boundary refused during the current task, newest last; `events`: the panel's log. */
+    'auto-coding': { task: SuperviseTask | null; isBandHidden: boolean; denials: string[]; events: SuperviseEvent[] }
   }
 }

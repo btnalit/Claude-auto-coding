@@ -48,6 +48,7 @@ function world(on: On, replies: Replies = {}) {
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
   return { clock, submitted, argvs }
 }
 
@@ -154,10 +155,9 @@ test('the band draws the task on every surface and its buttons act on it', async
   await startTask($, w, 'start add a login page')
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'auto-coding', surface, ...BAND })
-    expect(await ui.find({ type: 'Text', text: /auto-coding T\d+ Worker 工作中/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /AUTO-CODING T\d+ Worker 工作中/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /add a login page/ })).toBeDefined()
-    expect(await ui.find({ key: 'pause' })).toBeDefined()
-    expect(await ui.find({ key: 'stop' })).toBeDefined()
+    for (const key of ['panel', 'pause', 'stop', 'hide']) expect(await ui.find({ key })).toBeDefined()
     await ui.unmount()
   }
   const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...BAND })
@@ -168,6 +168,75 @@ test('the band draws the task on every surface and its buttons act on it', async
   expect(await supervise($, 'status')).toContain('已停止')
   expect(await ui.find({ key: 'clear' })).toBeDefined()
   await ui.unmount()
+})
+
+const pane = (bodyColumns: number) =>
+  ({
+    component: 'Pane',
+    requestId: 'auto-coding',
+    props: { title: 'auto-coding', isFocused: false, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  }) as const
+
+const STAGES = ['worker', 'decide', 'verify', 'review', 'done']
+
+test('the panel draws a complete layout before any task', async ($, on) => {
+  world(on)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'auto-coding', surface, ...pane(110) })
+    expect(await ui.find({ type: 'Text', text: /AUTO-CODING.*no task.*IDLE/ })).toBeDefined()
+    for (const stage of STAGES) expect(await ui.find({ key: `stage-${stage}` })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /没有监督任务/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /等待第一个事件/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('the panel follows the task: active stage, log, budget, boundary', async ($, on) => {
+  const w = world(on, { checkExit: 2 })
+  on('tool.call', () => ({ result: 'ok', text: 'ok' }))
+  await startTask($, w, 'start add a login page')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    for (const columns of [110, 60]) {
+      const ui = await $.ui.mount({ plugin: 'auto-coding', surface, ...pane(columns) })
+      expect(await ui.find({ type: 'Text', text: /AUTO-CODING.*T\d+.*Worker 工作中/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /启动：add a login page/ })).toBeDefined()
+      expect(await ui.find({ key: 'pause' })).toBeDefined()
+      await ui.unmount()
+    }
+  }
+
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(110) })
+  expect((await ui.find({ key: 'stage-worker' }))?.props.borderColor).toBe('#86e1e6')
+  expect((await ui.find({ key: 'stage-review' }))?.props.borderColor).toBe('#3a4154')
+
+  await shell($, 'Bash', 'git tag v1.0.0')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  // the check failed, so the task is back with the Worker on a repair round
+  expect(await ui.find({ type: 'Text', text: /diff-check 失败/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /修复轮 1\/3/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /◆ tag/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /拦截 1/ })).toBeDefined()
+  expect((await ui.find({ key: 'stage-verify' }))?.props.borderColor).toBe('#f08c8c')
+  await ui.unmount()
+})
+
+test('the panel animates only while the task is working', async ($, on) => {
+  const w = world(on)
+  let redraws = 0
+  on('ui.invalidate', () => {
+    redraws += 1
+    return { value: undefined }
+  })
+  await startTask($, w, 'start refactor')
+  await w.clock.advance(1_000)
+  expect(redraws).toBeGreaterThan(2)
+
+  await supervise($, 'pause')
+  await w.clock.advance(400)
+  const settled = redraws
+  await w.clock.advance(2_000)
+  expect(redraws).toBe(settled)
 })
 
 test('a review cut short pauses the task instead of parking it', async ($, on) => {
