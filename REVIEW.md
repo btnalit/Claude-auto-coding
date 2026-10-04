@@ -201,7 +201,7 @@
 ### 第二轮独立 Review 补充（第三轮已处理）
 
 - **P3-18** `hooks/register.tsx`（`turn.complete` 处理）：处理器在 `next(e)` 之前清除回合标记；这段窗口里对已暂停任务的 resume 会跳过等待、开始决策并把状态改离 `paused`，随后该回合走到 `notePausedTurn` 时状态已不匹配，这一轮的回复不会写入 `lastAnswer`。可选：记录这个竞态，或让 resume 路径取到刚结束那一轮的回复。
-  - **状态：已修（`ae80475`）**。`turn.complete` 从清掉标记起、到已暂停任务记下这一轮（`notePausedTurn`）为止，把模块级的 `turnWritten` 置为未完成（finally 里结束，底层失败也一样）；`resumeStep` 对已暂停任务先等它。记下回合不是迁移、不递增 seq，resume 的快照仍然有效，决策读到的就是刚结束的这一轮，且这一轮计入轮次。重载后它从已完成开始。没有采用把清标记挪到 `next(e)` 之后：读任务和 `notePausedTurn` 之间仍有窗口，而 resume 在标记还在时把任务改成 `running`、处理器却已按 `paused` 走掉，会让任务挂在「Worker 工作中」。测试「a resume while a paused turn is still ending decides on that turn」：挂住底层 turn.complete，期间 resume；修复前立刻 fork、读不到这一轮的回复、以 `轮次 0/40` 完成。
+  - **状态：已修（`ae80475`、`992c282`）**。`turn.complete` 从清掉标记起、到已暂停任务记下这一轮（`notePausedTurn`）为止，把模块级的 `turnWritten` 置为未完成（finally 里结束，底层失败也一样）；`resumeStep` 对已暂停任务先等它。记下回合不是迁移、不递增 seq，resume 的快照仍然有效，决策读到的就是刚结束的这一轮，且这一轮计入轮次。重载后它从已完成开始。没有采用把清标记挪到 `next(e)` 之后：读任务和 `notePausedTurn` 之间仍有窗口，而 resume 在标记还在时把任务改成 `running`、处理器却已按 `paused` 走掉，会让任务挂在「Worker 工作中」。测试「a resume while a paused turn is still ending decides on that turn」：挂住底层 turn.complete，期间 resume；修复前立刻 fork、读不到这一轮的回复、以 `轮次 0/40` 完成。同一窗口对 `start` 也开着（`992c282`）：`stop` 之后旧回合结束、标记已清但处理器还没读任务时 `start`，新任务会把旧回合当成自己的第 1 轮（P2-10 的同形问题）；`start` 在这段时间里按 P2-10 的口径拒绝（「等这一轮结束后再 /supervise start」），不在 `command.run` 里等待，免得命令派发等回合自己的收尾。测试「a start while the stopped task's turn is still ending waits for it too」，修复前第二次 start 在窗口内成功。
 - **P3-19** `hooks/register.tsx`（`session.start` 重跑被打断的步骤）：热重载后 1 秒才重跑并计入 `stepsInFlight`；这 1 秒内的 `/supervise resume` 看到在途数为 0，会再起一份同样的步骤。seq 守卫会丢弃其中一份结果，但检查或 Reviewer 会多跑一次。可选：在排定定时器时就计入 `stepsInFlight`。
   - **状态：不修**——"检查或 Reviewer 会多跑一次"不成立：重载排定的那份和 resume 起的那份持有同一个快照，步骤的第一件事都是对快照 seq 的 `patch`，后到的那份在任何检查、fork 或 Reviewer 调用之前就被丢弃。探针（基线 `39c4467`，退避定时器、重载重跑、resume 三份同时排着）：决策、检查、Review 各只跑 1 次。回归测试「a resume while a reload's re-run is pending runs the step once」（`0bd4ae5`）。
 
@@ -231,9 +231,9 @@
 | 真实引擎跑修复后的完整任务 | 未实测（本会话的监督器加载的是 `%TEMP%` 快照，不随工作区改动热重载） |
 | **第三轮（P3）** | |
 | `claude plugin test .`（基线 `39c4467`） | 104 pass |
-| 每条新增回归用例在对应修复前运行 | 均失败（P3-2：面板停止重绘；P3-3：重载后 1 秒就 fork、等待中 resume 不发重试；P3-4：停在「决策中」；P3-5：已完成 · 发布未核实；P3-6：第二个任务复用 id；P3-7：`预算 0 轮`；P3-9、P3-10：新增的放行用例被拒；P3-12、P3-13：新增的拒绝用例放行；P3-15：12 条中 4 条点亮错误；P3-16：80 列仍横排；P3-17：目标里带着换行；P3-18：resume 立刻 fork、`轮次 0/40`）。做法：只把被修文件还原到修复前（`git restore --source=HEAD`），测试文件保持新版 |
+| 每条新增回归用例在对应修复前运行 | 均失败（P3-2：面板停止重绘；P3-3：重载后 1 秒就 fork、等待中 resume 不发重试；P3-4：停在「决策中」；P3-5：已完成 · 发布未核实；P3-6：第二个任务复用 id；P3-7：`预算 0 轮`；P3-9、P3-10：新增的放行用例被拒；P3-12、P3-13：新增的拒绝用例放行；P3-15：12 条中 4 条点亮错误；P3-16：80 列仍横排；P3-17：目标里带着换行；P3-18：resume 立刻 fork、`轮次 0/40`，窗口内的第二次 start 成功）。做法：只把被修文件还原到修复前（`git restore --source=HEAD`），测试文件保持新版 |
 | P3-19 探针（基线 `39c4467` 的 `hooks/`，测试 world 已补 `command.register`） | 退避定时器、重载重跑、resume 三份排着：决策 fork 1 次、`git diff --check` 1 次、Review 1 次，任务完成 |
-| `claude plugin test .`（修复后） | 144 pass, 0 fail（policy 96 条，panel 12 条，loop 36 条） |
+| `claude plugin test .`（修复后） | 145 pass, 0 fail（policy 96 条，panel 12 条，loop 37 条） |
 | `claude plugin validate .` | 通过 |
 | `npx -p typescript tsc -p .` | 通过（P3-17 第一次提交的数字 key 由它发现，`1f74a51` 修正） |
-| `git diff --check` | 无输出 |
+| `git diff --check 39c4467`（验收的形式，覆盖第三轮全部提交） | 无输出 |
