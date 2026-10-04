@@ -154,12 +154,17 @@ export const register: Register = (on, options) => {
     await update($, WORKER_TURN, () => null)
     const result = await next(e)
     const task = await read($, TASK)
-    if (task === null || (task.status !== 'running' && task.status !== 'publishing')) return result
+    if (task === null) return result
     const end: TurnEnd = {
       reason: e.reason,
       answer: e.answer,
       refusal: e.reason === 'refusal' ? (e.refusal.explanation ?? e.refusal.category ?? undefined) : undefined,
     }
+    if (task.status === 'paused') {
+      await notePausedTurn($, task, end)
+      return result
+    }
+    if (task.status !== 'running' && task.status !== 'publishing') return result
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
@@ -378,6 +383,25 @@ async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promi
   }
   const deciding = await patch($, task, { status: 'deciding', turns, errors: 0, lastAnswer: tail(end.answer, 4000), note: undefined })
   if (deciding !== undefined) await decide($, deciding)
+}
+
+/**
+ * A turn that ends while paused (the one the pause let finish, or the person's own) is still a turn
+ * of the task's session and its latest reply: it counts against the budget, and the decision on
+ * resume reads it. Not a transition, so `seq` stays and a resume already on its way still applies.
+ */
+async function notePausedTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promise<void> {
+  let noted: SuperviseTask | undefined
+  await update($, TASK, current => {
+    noted = undefined
+    if (current === null || current.id !== task.id || current.status !== 'paused') return current
+    noted = { ...current, turns: current.turns + 1 }
+    if (end.reason === 'answer') noted.lastAnswer = tail(end.answer, 4000)
+    return noted
+  })
+  if (noted === undefined) return
+  $.ui.status(statusLine(noted))
+  void log($, noted, 'turn_while_paused', { reason: end.reason, turns: noted.turns })
 }
 
 /** Picks up a step a reload cut off, or a paused task being resumed. */

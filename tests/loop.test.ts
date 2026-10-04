@@ -183,6 +183,25 @@ test('a resume while the Worker turn still runs waits for that turn to end', asy
   expect(status).toContain('轮次 1/40')
 })
 
+test('a turn that ends while paused counts, and its reply is what the decision reads', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  await endTurn($, 'the reply that ended after the pause')
+  await w.clock.settle()
+  const paused = await supervise($, 'status')
+  expect(paused).toContain('已暂停')
+  expect(paused).toContain('轮次 1/40')
+
+  expect(await supervise($, 'resume')).not.toContain('这一轮结束')
+  await w.clock.settle()
+  expect(w.forks.at(-1)).toContain('the reply that ended after the pause')
+  const status = await supervise($, 'status')
+  expect(status).toContain('已完成')
+  expect(status).toContain('轮次 1/40')
+})
+
 /** Pauses and resumes the task, and says whether the resume waited for a turn in flight. */
 async function pauseAndResume($: Engine, w: { clock: { settle: () => Promise<void> } }): Promise<boolean> {
   await supervise($, 'pause')
