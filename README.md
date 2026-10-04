@@ -75,14 +75,34 @@ claude --plugin-dir D:\Claude-auto-coding
 
 要求在 git 仓库里启动：启动时记录 baseline commit，Reviewer 看的是相对 baseline 的 diff（含已提交和未提交改动、未跟踪文件）。
 
-**Headless / 无人值守**（已实测）：
+### 一键无人值守（推荐）
 
-```bash
-claude -p --plugin-dir D:/Claude-auto-coding "/supervise start <任务>"
-# Git Bash 下需先 export MSYS_NO_PATHCONV=1，否则 /supervise 会被改写成路径
+在任务所在的仓库里：
+
+```powershell
+D:\Claude-auto-coding\scripts\auto.ps1 "给 parser 加上空输入处理，并补测试"
+D:\Claude-auto-coding\scripts\auto.ps1 -Name fix-42 -Attach "修复 #42：空输入时崩溃"   # 启动后直接接入看面板
 ```
 
-监督步骤在 `turn.complete` 内执行完才放行，所以 `-p` 会话会一直跑到任务进入终态。
+它做的事，以及为什么（都是真实跑出来的坑）：
+
+| 步骤 | 为什么 |
+| --- | --- |
+| `claude --bg -w <Name>`：后台会话，worktree 建在仓库内 `.claude/worktrees/<Name>` | 无窗口、不占终端；`claude attach <id>` 随时接入看实时面板，`claude logs <id>` 看最近输出 |
+| 启动前检查仓库已被 Claude Code 信任 | 信任按**精确路径**记录、不继承上级目录：仓库外新建的目录会停在信任对话框上。`-w` 的 worktree 沿用仓库的信任；仓库本身没被信任就直接报错并说明怎么做（在该目录运行一次 `claude` 选信任，只需一次），绝不挂在一个看不见的对话框上 |
+| `--settings` 指定 `worktree.baseRef = head` | `-w` 默认从 `origin/<默认分支>` 建，本地未推送的提交会被漏掉 |
+| 任务就在本插件仓库上跑时，加载 HEAD 的快照（`%TEMP%\auto-coding-plugin-<sha>`） | Worker 改的正是插件源码，交互会话会在回合结束时热重载，快照让监督器保持不变 |
+| 只清掉标识"子会话"的环境变量（`CLAUDECODE`、`CLAUDE_JOB_DIR` 等） | 从另一个 Claude Code 会话里运行时，新会话不该把父会话的身份当成自己的；`CLAUDE_CONFIG_DIR` 等配置保留 |
+| 启动后读会话画面，确认出现"已启动监督任务" | 插件没加载时会话只会显示 `Unknown command: /supervise`，脚本据此报错并停止会话，不会假装任务在跑 |
+
+不用脚本时的等价命令（Linux / macOS 同样适用）：
+
+```bash
+cd <仓库> && claude --bg -w <名字> --settings '{"worktree":{"baseRef":"head"}}' \
+  --plugin-dir <插件目录> "/supervise start <任务>"
+```
+
+**Headless**（无界面，已实测）：`claude -p --plugin-dir D:/Claude-auto-coding "/supervise start <任务>"`。`-p` 本身跳过信任对话框；Git Bash 下需先 `export MSYS_NO_PATHCONV=1`，否则 `/supervise` 会被改写成路径。监督步骤在 `turn.complete` 内执行完才放行，所以 `-p` 会话会一直跑到任务进入终态。
 
 ### 实时面板
 
@@ -187,6 +207,7 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 hooks/hooks.json             { "modules": ["./register.tsx"] }
 hooks/register.tsx           所有 hook 与用到 $ 的状态机步骤（$ 不能跨 import 传递）
 hooks/panel.tsx              纯绘制：实时面板与状态条（拿到元素表和数据模型，不碰 $）
+scripts/auto.ps1             一键无人值守：后台会话 + 仓库内 worktree + 启动确认
 hooks/logic.ts               纯函数：标签、预算、提示词、JSON 解析
 hooks/policy.ts              纯函数：合并/发版边界
 types/index.d.ts             $.state 契约
