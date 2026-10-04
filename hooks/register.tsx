@@ -95,7 +95,7 @@ export const register: Register = (on, options) => {
       if (isWorking(task.status)) animate($)
       // A reload drops the step that was running; pick it up again.
       if (task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing') {
-        $.clock.after(1_000, () => detach($, inFlight(() => resumeStep($, task))))
+        $.clock.after(1_000, () => detach($, inFlight($, task, () => resumeStep($, task))))
       }
     }
     return next(e)
@@ -125,7 +125,7 @@ export const register: Register = (on, options) => {
       // Only a step a reload cut off is stuck; one still running here would run twice, side by side.
       if (isStuck && stepsInFlight > 0) return { text: `任务 ${task.id} ${LABEL[task.status]}：这一步仍在运行，无需恢复。` }
       const isTurnRunning = task.status === 'paused' && (await read($, WORKER_TURN)) !== null
-      $.clock.after(0, () => detach($, inFlight(() => resumeStep($, task))))
+      $.clock.after(0, () => detach($, inFlight($, task, () => resumeStep($, task))))
       return {
         text: isTurnRunning
           ? `恢复 ${task.id}：Worker 这一轮还在进行，等这一轮结束后再决策。`
@@ -170,7 +170,7 @@ export const register: Register = (on, options) => {
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
-      await inFlight(() => onWorkerTurn($, task, end, next.signal))
+      await inFlight($, task, () => onWorkerTurn($, task, end, next.signal))
     } catch (error) {
       $.ui.log(`auto-coding: ${errorText(error)}`)
     }
@@ -363,13 +363,30 @@ function log($: Engine, task: SuperviseTask, type: string, detail?: unknown): Pr
 // or reviewing task a reload cut off is told from one whose step is still at work.
 let stepsInFlight = 0
 
-async function inFlight(step: () => Promise<void>): Promise<void> {
+/** Runs a step of `task`'s loop, counted while it runs; one that fails unexpectedly leaves the task paused. */
+async function inFlight($: Engine, task: SuperviseTask, step: () => Promise<void>): Promise<void> {
   stepsInFlight += 1
+  let failure: { error: unknown } | undefined
   try {
     await step()
+  } catch (error) {
+    failure = { error }
   } finally {
     stepsInFlight -= 1
   }
+  if (failure === undefined) return
+  await stall($, task, failure.error)
+  throw failure.error
+}
+
+/**
+ * After a step failed unexpectedly nothing moves its task on: the spinner would turn for good and a
+ * `-p` session would end on a working task. Unless another step is at work, the task is paused, saying why.
+ */
+async function stall($: Engine, origin: SuperviseTask, error: unknown): Promise<void> {
+  const task = await read($, TASK)
+  if (task === null || task.id !== origin.id || !isWorking(task.status) || stepsInFlight > 0) return
+  await patch($, task, { status: 'paused', note: `监督步骤出错：${head(errorText(error), 200)}；/supervise resume 重试` })
 }
 
 /** `signal` is the turn.complete dispatch's: it aborts when the person presses Esc during the steps. */
@@ -667,7 +684,7 @@ async function pauseFromBand($: Engine): Promise<void> {
 
 async function resumeFromBand($: Engine): Promise<void> {
   const task = await read($, TASK)
-  if (task !== null && task.status === 'paused') await inFlight(() => resumeStep($, task))
+  if (task !== null && task.status === 'paused') await inFlight($, task, () => resumeStep($, task))
 }
 
 async function stopFromBand($: Engine): Promise<void> {

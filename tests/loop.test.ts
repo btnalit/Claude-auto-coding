@@ -20,6 +20,8 @@ type Replies = {
   checkExit?: number
   isReviewAborted?: boolean
   isForkHeld?: boolean
+  /** The decision fork rejects, as no step expects. */
+  isForkFailing?: boolean
   isCheckHeld?: boolean
   /** What `git status` prints. */
   status?: string
@@ -63,6 +65,7 @@ function world(on: On, replies: Replies = {}) {
   const forks: string[] = []
   on('model.fork', async ($, e) => {
     forks.push(e.prompt)
+    if (replies.isForkFailing === true) throw new Error('model.fork failed beneath the mod')
     if (replies.isForkHeld === true) await forkReleased
     return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
   })
@@ -86,6 +89,7 @@ function world(on: On, replies: Replies = {}) {
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   return { clock, submitted, argvs, forks, reviews, releaseFork, releaseCheck }
 }
@@ -462,6 +466,17 @@ test('a resume while a tick reads the pause keeps the panel moving', async ($, o
   const settled = redraws
   await w.clock.advance(1_000)
   expect(redraws).toBeGreaterThan(settled)
+})
+
+test('a step that fails unexpectedly pauses the task instead of leaving it deciding', async ($, on) => {
+  const w = world(on, { isForkFailing: true })
+  await startTask($, w, 'start refactor')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('监督步骤出错：')
+  expect(status).toContain('/supervise resume 重试')
 })
 
 test('a review cut short pauses the task instead of parking it', async ($, on) => {
