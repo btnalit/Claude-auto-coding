@@ -740,8 +740,14 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   if ('error' in project) return { text: project.error }
 
   const now = await $.clock.now()
+  const logDir = `${gitDir.stdout.trim()}/auto-coding`
+  // An id is to the second: a task started in the same second as the last one (start, stop, clear,
+  // start) takes a suffix, so each keeps an audit log of its own.
+  const stamp = `T${new Date(now).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`
+  let id = stamp
+  for (let n = 2; id === existing?.id || (await $.fs.exists(`${logDir}/${id}.jsonl`).catch(() => false)); n += 1) id = `${stamp}-${n}`
   const task: SuperviseTask = {
-    id: `T${new Date(now).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`,
+    id,
     goal,
     cwd,
     gitDir: gitDir.stdout.trim(),

@@ -54,9 +54,17 @@ function world(on: On, replies: Replies = {}) {
     if (line.startsWith('git status')) return run(replies.status ?? '')
     return run('')
   })
-  on('fs.exists', () => ({ value: false }))
-  on('fs.read', () => ({ deny: 'no such file' }))
-  on('fs.write', () => ({ value: undefined }))
+  // Files the mod writes (its audit logs) are there to read back; nothing else is.
+  const files = new Map<string, string>()
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.read', ($, e) => {
+    const text = files.get(e.path)
+    return text === undefined ? { deny: 'no such file' } : { value: text }
+  })
+  on('fs.write', ($, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
   // A held fork answers only once the test releases it, so the test can act while a decision is in flight.
   let releaseFork = () => {}
   const forkReleased = new Promise<void>(resolve => {
@@ -93,7 +101,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, forks, reviews, releaseFork, releaseCheck }
+  return { clock, submitted, argvs, forks, reviews, files, releaseFork, releaseCheck }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -302,6 +310,21 @@ test('a session that ends mid-turn leaves no turn in flight for the next task', 
   expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
   expect(await pauseAndResume($, w)).toBe(false)
   expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('two tasks started within one second keep audit logs of their own', async ($, on) => {
+  const w = world(on)
+  const first = (await startTask($, w, 'start refactor')).match(/T[\d-]+/)?.[0]
+  await supervise($, 'stop')
+  await supervise($, 'clear')
+  const second = (await startTask($, w, 'start add tests')).match(/T[\d-]+/)?.[0]
+  expect(first).toBe('T261004080000')
+  expect(second).toBe('T261004080000-2')
+  const logOf = (id: string | undefined) => [...w.files].find(([path]) => path.replace(/\\/g, '/').endsWith(`/auto-coding/${id}.jsonl`))?.[1] ?? ''
+  const firstLog = logOf(first)
+  expect([...w.files.keys()]).toHaveLength(2)
+  expect(firstLog).toContain('refactor')
+  expect(firstLog).not.toContain('add tests')
 })
 
 test("a start waits for the stopped task's turn instead of taking it as its own", async ($, on) => {
