@@ -15,13 +15,18 @@ const SEPARATORS = /&&|\|\||\$\(|[;&|\n\r(){}`]/
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec'])
 const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell'])
+const REBASE_OPTIONS_WITH_VALUE = new Set(['--onto', '-s', '--strategy', '-X', '--strategy-option', '-x', '--exec'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
+const GRAPHQL = /\bgh\b.*\bgraphql\b/
 const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
+const YARN_BUMP = /^--(major|minor|patch|premajor|preminor|prepatch|prerelease|new-version)(=|$)/
 
-const PUBLISHERS: Record<string, (words: string[]) => boolean> = {
+/** `words` are the arguments that are not flags; `args` all of them. */
+const PUBLISHERS: Record<string, (words: string[], args: string[]) => boolean> = {
   npm: w => w.includes('publish') || isVersionBump(w) || (w[0] === 'dist-tag' && w[1] === 'add'),
   pnpm: w => w.includes('publish') || isVersionBump(w),
-  yarn: w => w.includes('publish') || isVersionBump(w),
+  // yarn v1 takes the new version as a flag: `yarn version --patch`, `--new-version=2.0.0`.
+  yarn: (w, args) => w.includes('publish') || isVersionBump(w) || (w[0] === 'version' && args.some(a => YARN_BUMP.test(a))),
   bun: w => w.includes('publish'),
   cargo: w => w.includes('publish'),
   poetry: w => w.includes('publish'),
@@ -64,13 +69,18 @@ export function isProtected(name: string | undefined, protectedBranches: readonl
 }
 
 /**
- * Drops text that is data, not commands: a heredoc body fed to anything but a
- * shell, a PowerShell here-string, and a quoted message, title or body.
+ * Drops text that is data, not commands: a heredoc body or a PowerShell
+ * here-string fed to anything but a shell, and a quoted message, title or body.
+ * A `gh api graphql` heredoc stays, for the mutation it names.
  */
 export function stripData(command: string): string {
   const kept: string[] = []
   let terminator: string | undefined
-  for (const line of command.replace(/@(['"])\r?\n[\s\S]*?\r?\n\1@/g, ' ').split('\n')) {
+  // A here-string a shell runs is commands too: `@'…'@ | Invoke-Expression`, `iex @'…'@`.
+  const hereStrings = command.replace(/@(['"])\r?\n[\s\S]*?\r?\n\1@/g, (body: string, _quote: string, at: number) =>
+    isRunByShell(lineAround(command, at, at + body.length)) ? body : ' ',
+  )
+  for (const line of hereStrings.split('\n')) {
     if (terminator !== undefined) {
       if (line.trim() === terminator) terminator = undefined
       continue
@@ -78,7 +88,7 @@ export function stripData(command: string): string {
     kept.push(line)
     const heredoc = /<<-?\s*(['"]?)(\w+)\1/.exec(line)
     // A body a shell reads is commands wherever the shell sits on the line: `bash -s <<EOF`, `cat <<EOF | bash`.
-    if (heredoc !== null && !line.split(/[\s|'"]+/).some(word => SHELLS.has(programOf(word)))) terminator = heredoc[2]
+    if (heredoc !== null && !isRunByShell(line) && !GRAPHQL.test(line)) terminator = heredoc[2]
   }
   return kept
     .join('\n')
@@ -92,6 +102,17 @@ export function segments(command: string): string[][] {
     .split(SEPARATORS)
     .map(part => part.trim().split(/\s+/).filter(Boolean))
     .filter(words => words.length > 0)
+}
+
+function isRunByShell(line: string): boolean {
+  return line.split(/[\s|'";&()]+/).some(word => SHELLS.has(programOf(word)))
+}
+
+/** What surrounds `text.slice(start, end)` on its first and last lines. */
+function lineAround(text: string, start: number, end: number): string {
+  const from = text.lastIndexOf('\n', start - 1) + 1
+  const to = text.indexOf('\n', end)
+  return `${text.slice(from, start)} ${text.slice(end, to === -1 ? undefined : to)}`
 }
 
 function programOf(token: string): string {
@@ -116,7 +137,7 @@ function checkSegment(tokens: string[], context: BoundaryContext, command: strin
   if (program === 'git') return checkGit(args, context)
   if (program === 'gh') return checkGh(args, context, command)
   const words = args.filter(a => !a.startsWith('-'))
-  return PUBLISHERS[program]?.(words) === true ? `发布制品（${program} ${words.join(' ')}）` : undefined
+  return PUBLISHERS[program]?.(words, args) === true ?`发布制品（${program} ${words.join(' ')}）` : undefined
 }
 
 function gitSubcommand(args: string[]): { sub: string; rest: string[] } | undefined {
@@ -143,7 +164,9 @@ function checkGit(args: string[], context: BoundaryContext): string | undefined 
   if (sub === 'rebase') {
     if (flags.some(f => ['--abort', '--continue', '--skip', '--quit', '--edit-todo'].includes(f))) return undefined
     if (onProtected) return `在受保护分支 ${context.branch} 上 git rebase`
-    return isProtected(words[1], context.protectedBranches) ? `git rebase 改写受保护分支 ${words[1]}` : undefined
+    // `--onto <newbase>`, a strategy and `--exec` take a value: what is left is `<upstream> [<branch>]`.
+    const [, rewritten] = rest.filter((a, i) => !a.startsWith('-') && !REBASE_OPTIONS_WITH_VALUE.has(rest[i - 1] ?? ''))
+    return isProtected(rewritten, context.protectedBranches) ? `git rebase 改写受保护分支 ${rewritten}` : undefined
   }
   if (sub === 'push') return checkPush(rest, context)
   if (sub === 'tag') {

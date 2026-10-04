@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import type { Engine, Plugin } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 // The test's hooks stand for the engine beneath the mod: git answers from a
@@ -11,8 +11,19 @@ const PRESENTATION = { isFullscreen: false, columns: 120 }
 const COMPOSER = { kind: 'composer' } as const
 const PASS = '{"verdict":"pass","summary":"task accomplished","findings":[]}'
 const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
+/** An answer whose turn.complete fails beneath the mod. */
+const CORE_FAILS = 'core fails'
 
-type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean }
+type Replies = {
+  decision?: string
+  review?: string
+  checkExit?: number
+  isReviewAborted?: boolean
+  isForkHeld?: boolean
+  isCheckHeld?: boolean
+  /** What `git status` prints. */
+  status?: string
+}
 
 function world(on: On, replies: Replies = {}) {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 4, 8) })
@@ -22,14 +33,23 @@ function world(on: On, replies: Replies = {}) {
   const run = (stdout: string, exitCode = 0) => ({
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
-  on('process.run', ($, e) => {
+  // A held check answers only once the test releases it, so the test can act while the checks run.
+  let releaseCheck = () => {}
+  const checkReleased = new Promise<void>(resolve => {
+    releaseCheck = resolve
+  })
+  on('process.run', async ($, e) => {
     const line = e.argv.join(' ')
     argvs.push(line)
     if (line === 'git rev-parse --show-toplevel') return run('D:/repo\n')
     if (line === 'git rev-parse HEAD') return run('abc1234\n')
     if (line === 'git rev-parse --absolute-git-dir') return run('D:/repo/.git\n')
     if (line.startsWith('git symbolic-ref')) return run('feat/x\n')
-    if (line.startsWith('git diff --check')) return run('', replies.checkExit ?? 0)
+    if (line.startsWith('git diff --check')) {
+      if (replies.isCheckHeld === true) await checkReleased
+      return run('', replies.checkExit ?? 0)
+    }
+    if (line.startsWith('git status')) return run(replies.status ?? '')
     return run('')
   })
   on('fs.exists', () => ({ value: false }))
@@ -40,25 +60,34 @@ function world(on: On, replies: Replies = {}) {
   const forkReleased = new Promise<void>(resolve => {
     releaseFork = resolve
   })
-  on('model.fork', async () => {
+  const forks: string[] = []
+  on('model.fork', async ($, e) => {
+    forks.push(e.prompt)
     if (replies.isForkHeld === true) await forkReleased
     return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
   })
-  on('model.complete', () =>
-    replies.isReviewAborted === true
+  const reviews: string[] = []
+  on('model.complete', ($, e) => {
+    reviews.push(e.prompt)
+    return replies.isReviewAborted === true
       ? { value: { isAnswered: false, reason: 'aborted', usage: USAGE } }
-      : { value: { isAnswered: true, text: replies.review ?? PASS, usage: USAGE } },
-  )
+      : { value: { isAnswered: true, text: replies.review ?? PASS, usage: USAGE } }
+  })
   on('prompt.submit', ($, e) => {
     submitted.push(e.text)
     return { text: e.text }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('turn.complete', ($, e) => {
+    if (e.answer === CORE_FAILS) throw new Error('turn.complete failed beneath the mod')
+    return { text: e.answer }
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, releaseFork }
+  return { clock, submitted, argvs, forks, reviews, releaseFork, releaseCheck }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -107,6 +136,20 @@ test('a failed check sends a repair turn', async ($, on) => {
   expect(await supervise($, 'status')).toContain('Worker 工作中')
   expect(w.submitted.at(-1)).toContain('第 1/3 轮修复')
   expect(w.submitted.at(-1)).toContain('diff-check')
+})
+
+test('the reviewer is told of every untracked file, whatever its name, even one it cannot read', async ($, on) => {
+  // `-z` output: NUL-separated, never quoted; a rename carries its source as a field of its own.
+  const w = world(on, { status: 'R  src/renamed.ts\0src/original.ts\0?? 说明.md\0?? src/new.ts\0' })
+  await startTask($, w, 'start add notes')
+  await endTurn($, 'done')
+  await w.clock.settle()
+
+  const review = w.reviews.at(-1) ?? ''
+  expect(review).toContain('说明.md')
+  expect(review).toContain('src/new.ts')
+  expect(review).not.toContain('src/original.ts')
+  expect(w.argvs).toContain('git status --porcelain -z --untracked-files=all')
 })
 
 test('a revise verdict sends the findings back', async ($, on) => {
@@ -172,6 +215,85 @@ test('a resume while the Worker turn still runs waits for that turn to end', asy
   const status = await supervise($, 'status')
   expect(status).toContain('已完成')
   expect(status).toContain('轮次 1/40')
+})
+
+test('a turn that ends while paused counts, and its reply is what the decision reads', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  await endTurn($, 'the reply that ended after the pause')
+  await w.clock.settle()
+  const paused = await supervise($, 'status')
+  expect(paused).toContain('已暂停')
+  expect(paused).toContain('轮次 1/40')
+
+  expect(await supervise($, 'resume')).not.toContain('这一轮结束')
+  await w.clock.settle()
+  expect(w.forks.at(-1)).toContain('the reply that ended after the pause')
+  const status = await supervise($, 'status')
+  expect(status).toContain('已完成')
+  expect(status).toContain('轮次 1/40')
+})
+
+/** Pauses and resumes the task, and says whether the resume waited for a turn in flight. */
+async function pauseAndResume($: Engine, w: { clock: { settle: () => Promise<void> } }): Promise<boolean> {
+  await supervise($, 'pause')
+  const waited = (await supervise($, 'resume')).includes('这一轮结束')
+  await w.clock.settle()
+  return waited
+}
+
+test('a fresh session start drops a turn marker whose end never came', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+
+  // No turn runs after the load, so a resume decides instead of waiting for a turn.complete that never comes.
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('a turn.complete that fails beneath the mod still ends the turn', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await endTurn($, CORE_FAILS).catch(() => undefined)
+
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('a session that ends mid-turn leaves no turn in flight for the next task', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await $.session.end({ reason: 'clear', sessionId: 's-1', resume: { id: 's-1' } })
+  expect(await supervise($, 'status')).toContain('已停止')
+
+  await w.clock.advance(1_000)
+  expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test("a start waits for the stopped task's turn instead of taking it as its own", async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'stop')
+  expect(await supervise($, 'start add tests')).toContain('等这一轮结束')
+  expect(w.submitted).toHaveLength(1)
+
+  // The old turn ends under the stopped task and moves nothing; then the new task starts clean.
+  await endTurn($, 'the old task answer')
+  await w.clock.advance(1_000)
+  expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
+  const status = await supervise($, 'status')
+  expect(status).toContain('Worker 工作中')
+  expect(status).toContain('轮次 0/40')
+  expect(w.submitted).toHaveLength(2)
 })
 
 const BAND = {
@@ -278,6 +400,36 @@ test('a review cut short pauses the task instead of parking it', async ($, on) =
   expect(status).toContain('Review 被中断或超时')
 })
 
+/** Settles turn.complete a second after it starts while the hooks beneath still run: the dispatch is abandoned, as Esc does. */
+const IMPATIENT = {
+  name: 'impatient',
+  tier: 'prepend',
+  register(on) {
+    on('turn.complete', async ($, e, next) => {
+      void next(e).catch(() => undefined)
+      await $.clock.sleep(1_000)
+      return { text: e.answer }
+    })
+  },
+} as const satisfies Plugin
+
+test('Esc during the checks pauses the task instead of sending a repair turn', { plugins: [IMPATIENT] }, async ($, on) => {
+  const w = world(on, { checkExit: 2, isCheckHeld: true })
+  await startTask($, w, 'start refactor')
+  const ending = endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('验收检查中')
+
+  await w.clock.advance(1_000)
+  await ending
+  w.releaseCheck()
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('验收被中断')
+  expect(w.submitted).toHaveLength(1)
+})
+
 test('the boundary denies merges and releases only while a task is active', async ($, on) => {
   const w = world(on)
   const ran: string[] = []
@@ -314,6 +466,23 @@ test('a long decision keeps its action at the head of the log row and the stage'
   expect(stage?.text).toContain('verify')
   expect(stage?.text).not.toContain('xxxxxxxxxx')
   await ui.unmount()
+})
+
+test('a resume while a step still runs here does not run it a second time', async ($, on) => {
+  const w = world(on, { isForkHeld: true })
+  await startTask($, w, 'start refactor')
+  const ending = endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('决策中')
+
+  expect(await supervise($, 'resume')).toContain('仍在运行')
+  await w.clock.settle()
+  w.releaseFork()
+  await ending
+  await w.clock.settle()
+  expect(w.forks).toHaveLength(1)
+  expect(w.argvs.filter(line => line.startsWith('git diff --check'))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('已完成')
 })
 
 test('a decision a pause overtook is never logged or acted on', async ($, on) => {
