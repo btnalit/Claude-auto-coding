@@ -80,6 +80,9 @@ export const register: Register = (on, options) => {
   const settings = settingsOf(options)
 
   on('session.start', async ($, e, next) => {
+    // session.start comes before the first prompt or at a reload, which waits for the turn to end:
+    // a turn still marked in flight now is one whose turn.complete never came.
+    await update($, WORKER_TURN, () => null)
     await $.command.register({
       name: 'supervise',
       description: '无人值守开发监督：start <任务> | panel | status | pause | resume | stop | clear',
@@ -143,10 +146,11 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
     // A subagent's turn is the Worker's own business, not a Worker turn.
-    if (e.agentId !== undefined) return result
+    if (e.agentId !== undefined) return next(e)
+    // The turn has ended whatever happens beneath: a failure there must not leave it marked in flight.
     await update($, WORKER_TURN, () => null)
+    const result = await next(e)
     const task = await read($, TASK)
     if (task === null || (task.status !== 'running' && task.status !== 'publishing')) return result
     const end: TurnEnd = {
@@ -217,6 +221,8 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const task = await read($, TASK)
     if (task !== null && isActive(task.status)) await finish($, task, 'stopped', `会话结束（${e.reason}）`)
+    // No turn outlives its session, and after a /clear no session.start comes to drop the marker.
+    await update($, WORKER_TURN, () => null)
     return next(e)
   })
 
@@ -622,6 +628,10 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   const existing = await read($, TASK)
   if (existing !== null && isActive(existing.status)) {
     return { text: `已有监督任务 ${existing.id}（${LABEL[existing.status]}）。先 /supervise stop。` }
+  }
+  // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn.
+  if ((await read($, WORKER_TURN)) !== null) {
+    return { text: '会话里还有一轮在进行（/supervise stop 不会打断它）。等这一轮结束后再 /supervise start。' }
   }
   let cwd: string
   try {

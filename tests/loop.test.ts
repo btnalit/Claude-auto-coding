@@ -11,6 +11,8 @@ const PRESENTATION = { isFullscreen: false, columns: 120 }
 const COMPOSER = { kind: 'composer' } as const
 const PASS = '{"verdict":"pass","summary":"task accomplished","findings":[]}'
 const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
+/** An answer whose turn.complete fails beneath the mod. */
+const CORE_FAILS = 'core fails'
 
 type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean }
 
@@ -54,7 +56,12 @@ function world(on: On, replies: Replies = {}) {
     return { text: e.text }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('turn.complete', ($, e) => {
+    if (e.answer === CORE_FAILS) throw new Error('turn.complete failed beneath the mod')
+    return { text: e.answer }
+  })
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -172,6 +179,66 @@ test('a resume while the Worker turn still runs waits for that turn to end', asy
   const status = await supervise($, 'status')
   expect(status).toContain('已完成')
   expect(status).toContain('轮次 1/40')
+})
+
+/** Pauses and resumes the task, and says whether the resume waited for a turn in flight. */
+async function pauseAndResume($: Engine, w: { clock: { settle: () => Promise<void> } }): Promise<boolean> {
+  await supervise($, 'pause')
+  const waited = (await supervise($, 'resume')).includes('这一轮结束')
+  await w.clock.settle()
+  return waited
+}
+
+test('a fresh session start drops a turn marker whose end never came', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+
+  // No turn runs after the load, so a resume decides instead of waiting for a turn.complete that never comes.
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('a turn.complete that fails beneath the mod still ends the turn', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await endTurn($, CORE_FAILS).catch(() => undefined)
+
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('a session that ends mid-turn leaves no turn in flight for the next task', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await $.session.end({ reason: 'clear', sessionId: 's-1', resume: { id: 's-1' } })
+  expect(await supervise($, 'status')).toContain('已停止')
+
+  await w.clock.advance(1_000)
+  expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
+  expect(await pauseAndResume($, w)).toBe(false)
+  expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test("a start waits for the stopped task's turn instead of taking it as its own", async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'stop')
+  expect(await supervise($, 'start add tests')).toContain('等这一轮结束')
+  expect(w.submitted).toHaveLength(1)
+
+  // The old turn ends under the stopped task and moves nothing; then the new task starts clean.
+  await endTurn($, 'the old task answer')
+  await w.clock.advance(1_000)
+  expect(await startTask($, w, 'start add tests')).toContain('已启动监督任务')
+  const status = await supervise($, 'status')
+  expect(status).toContain('Worker 工作中')
+  expect(status).toContain('轮次 0/40')
+  expect(w.submitted).toHaveLength(2)
 })
 
 const BAND = {
