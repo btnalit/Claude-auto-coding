@@ -140,7 +140,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 **拒绝**
 
 - 合并：`gh pr merge`；在受保护分支上 `git merge` / `git rebase`（会跟踪同一条命令里的 `checkout`/`switch`）；直推受保护分支（`git push origin main`、`HEAD:main`、当前分支是 main 时的裸 `git push`、删除受保护分支）；`git branch -f/-D/-M` 或 `git update-ref` 改写受保护分支；`gh api` 合并 PR / 改写受保护分支
-- 发版：创建/删除 tag；推 tag（`--tags`、`--follow-tags`、`refs/tags/`、形如 `v1.2.3` 的 refspec）；`--all` / `--mirror`；`gh release create/upload/edit/delete`；`gh api` 发版；`npm/pnpm/yarn/bun publish`、`npm version <x>`、`cargo/poetry/uv publish`、`twine upload`、`gem push`、`dotnet nuget push`、`docker/podman push`、`vsce/ovsx publish`、`lerna publish`、`changeset publish`、`goreleaser release`、`semantic-release`、`release-it`
+- 发版：创建/删除 tag；推 tag（`--tags`、`--follow-tags`、`refs/tags/`、`tag <名>`、形如 `v1.2.3` 的 refspec）；`--all` / `--mirror`；`gh release create/upload/edit/delete`；`gh api` 发版；`npm/pnpm/yarn/bun publish`、`npm version <x>`、`cargo/poetry/uv publish`、`twine upload`、`gem push`、`dotnet nuget push`、`docker/podman push`、`vsce/ovsx publish`、`lerna publish`、`changeset publish`、`goreleaser release`、`semantic-release`、`release-it`
 
 **放行**：推功能分支（含 `--force-with-lease`）、`gh pr create/view/checks`、在功能分支上 merge/rebase main、在 main 上 `git pull`，以及一切本地开发操作（编辑、测试、提交）。
 
@@ -150,8 +150,9 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 
 ## 6. 状态与审计
 
-- 状态：`$.state`（`auto-coding.task`、`auto-coding.denials`、`auto-coding.isBandHidden`），类型契约在 `types/index.d.ts`
+- 状态：`$.state`（`auto-coding.task`、`auto-coding.denials`、`auto-coding.events`、`auto-coding.isBandHidden`、`auto-coding.workerTurn`），类型契约在 `types/index.d.ts`
 - 每次状态迁移递增 `seq`；异步步骤写回前核对 `seq`，被暂停/停止/重载超越的结果直接丢弃
+- `workerTurn` 记录主循环在途回合：Worker 这一轮还没结束就 resume 时，任务回到 `running`，等这一轮结束再决策，不会读半轮对话或排第二条指令
 - 热重载：`session.start` 发现 `deciding/verifying/reviewing` 会自动重跑该步骤
 - 审计日志：`<git-dir>/auto-coding/<id>.jsonl`，记录 `task_started`、`status`、`decision`、`checks`、`review`、`worker_input`、`boundary_denied`
 
@@ -173,8 +174,8 @@ claude plugin validate D:\Claude-auto-coding   # manifest、hooks、state 契约
 claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 ```
 
-- `tests/policy.test.ts`：边界放行/拒绝两侧 55 条用例
-- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
+- `tests/policy.test.ts`：边界放行/拒绝两侧 65 条用例
+- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
 已在真实引擎（2.1.289，Windows，`-p`）实测：一次通过闭环、检查失败 → 修复轮 → 通过、`git tag` 经 PowerShell 被拦截且 Reviewer 据拦截记录给出 `human`。

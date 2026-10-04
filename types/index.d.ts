@@ -85,7 +85,10 @@ export type SuperviseEvent = {
 
 declare module 'claude-code' {
   interface PluginState {
-    /** `denials`: what the boundary refused during the current task, newest last; `events`: the panel's log. */
-    'auto-coding': { task: SuperviseTask | null; isBandHidden: boolean; denials: string[]; events: SuperviseEvent[] }
+    /**
+     * `denials`: what the boundary refused during the current task, newest last; `events`: the panel's log;
+     * `workerTurn`: the id of the main loop's turn in flight, null between turns.
+     */
+    'auto-coding': { task: SuperviseTask | null; isBandHidden: boolean; denials: string[]; events: SuperviseEvent[]; workerTurn: string | null }
   }
 }
