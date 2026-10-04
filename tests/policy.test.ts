@@ -36,6 +36,9 @@ describe('allowed: push, PR and ordinary work', () => {
     ["git commit -m @'\nrelease: git merge main\n'@", onMain],
     ["@'\ngit push origin main\n'@ | Set-Content notes.md", onFeature],
     ["gh api graphql -F query=@- <<'EOF'\nquery { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }\nEOF", onFeature],
+    ['git push origin HEAD', { branch: '2.0.x', protectedBranches: PROTECTED }],
+    ['git push -u origin 2.0.x', onFeature],
+    ['git push origin HEAD', { branch: '3.11', protectedBranches: PROTECTED }],
   ]
   for (const [command, context] of allowed) {
     test(`allows: ${command.split('\n')[0]}`, () => {
@@ -64,6 +67,8 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['git push --tags', onFeature],
     ['git push --follow-tags origin feat/login', onFeature],
     ['git push origin v1.4.0', onFeature],
+    ['git push origin 1.4.0-rc.1', onFeature],
+    ['git push origin HEAD:v1.4.0', onFeature],
     ['git push origin refs/tags/v1', onFeature],
     ['git tag v1.4.0', onFeature],
     ['git tag -a v1.4.0 -m "release"', onFeature],
