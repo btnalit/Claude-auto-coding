@@ -158,7 +158,8 @@ export function stageViews(task: SuperviseTask | null, events: readonly Supervis
   const lastDecision = [...events].reverse().find(e => e.who === 'decide')?.text.split('：')[0] ?? '—'
   const subs = [
     active === 0 ? `${spin} 第 ${task.turns + 1} 轮` : `${task.turns} 轮`,
-    active === 1 ? `${spin} 判断中` : lastDecision,
+    // Waiting out an API error is no decision being made: the stage counts down to the retry.
+    active === 1 ? (task.retryAt === undefined ? `${spin} 判断中` : `${spin} 重试 ${Math.max(0, Math.ceil((task.retryAt - now) / 1000))}s`) : lastDecision,
     active === 2 ? `${spin} 运行检查` : checks === undefined ? '—' : `${passed}/${checks.length} ${passed === checks.length ? '✓' : '✗'}`,
     active === 3 ? `${spin} ${task.reviewerModel}` : (task.lastReview?.verdict ?? '—'),
     active === 4 ? `${spin} ${task.publish}` : isActive(task.status) ? '—' : LABEL[task.status],

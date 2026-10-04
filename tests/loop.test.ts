@@ -86,6 +86,8 @@ function world(on: On, replies: Replies = {}) {
     return { text: e.answer }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  // Without it session.start would stop at the command and never pick up a step, as a reload does.
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
@@ -110,7 +112,7 @@ function shell($: Engine, tool: 'Bash' | 'PowerShell', command: string) {
   return $.tool.call({ tool, command } as unknown as Parameters<Engine['tool']['call']>[0])
 }
 
-function endTurn($: Engine, answer: string, extra: { agentId?: string; reason?: 'answer' | 'aborted' } = {}) {
+function endTurn($: Engine, answer: string, extra: { agentId?: string; reason?: 'answer' | 'aborted' | 'error' } = {}) {
   const reason = extra.reason ?? 'answer'
   return $.turn.complete({ answer, durationMs: 1000, isAborted: reason === 'aborted', turnId: 'turn-1', reason, agentId: extra.agentId })
 }
@@ -492,6 +494,45 @@ test('Esc during the publishing turn pauses the task instead of ending it', { op
   const status = await supervise($, 'status')
   expect(status).toContain('已暂停')
   expect(status).toContain('你中断了发布这一轮')
+})
+
+const RETRY = '从中断处继续'
+
+test('a reload while an API error is waited out keeps the wait and retries the Worker', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('API 错误，30s 后重试')
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...pane(110) })
+  expect((await ui.find({ key: 'stage-decide' }))?.text).toContain('重试 30s')
+  await ui.unmount()
+
+  // A reload picks a deciding task up a second after it loads.
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+  await w.clock.advance(1_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(0)
+
+  await w.clock.advance(29_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+})
+
+test('a resume while an API error is waited out retries now, once', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+
+  await w.clock.advance(30_000)
+  expect(w.forks).toHaveLength(0)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
 })
 
 test('a review cut short pauses the task instead of parking it', async ($, on) => {

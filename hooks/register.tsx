@@ -93,9 +93,10 @@ export const register: Register = (on, options) => {
     if (task !== null) {
       $.ui.status(statusLine(task))
       if (isWorking(task.status)) animate($)
-      // A reload drops the step that was running; pick it up again.
+      // A reload drops the step that was running; pick it up again. A wait before a retry keeps what is left of it.
       if (task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing') {
-        $.clock.after(1_000, () => detach($, inFlight($, task, () => resumeStep($, task))))
+        const delay = task.retryAt === undefined ? 1_000 : Math.max(1_000, task.retryAt - (await $.clock.now()))
+        $.clock.after(delay, () => detach($, inFlight($, task, () => resumeStep($, task))))
       }
     }
     return next(e)
@@ -273,6 +274,8 @@ async function patch($: Engine, task: SuperviseTask, change: Partial<SuperviseTa
   if (change.status === 'paused' && task.status !== 'paused') {
     change = { ...change, pausedOnTurn: (await read($, WORKER_TURN)) ?? undefined }
   }
+  // A planned retry belongs to the wait it was planned in: any other transition drops it.
+  if (change.status !== undefined && !('retryAt' in change)) change = { ...change, retryAt: undefined }
   let applied: SuperviseTask | undefined
   await update($, TASK, current => {
     applied = undefined
@@ -409,10 +412,10 @@ async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd, signal
   if (end.reason === 'error') {
     const errors = task.errors + 1
     if (errors > MAX_API_ERRORS) return finish($, task, 'failed', `Worker 连续 ${errors} 轮 API 错误`)
-    const waiting = await patch($, task, { status: 'deciding', turns, errors, note: `API 错误，${errors * 30}s 后重试` })
-    if (waiting !== undefined) {
-      $.clock.after(errors * 30_000, () => detach($, send($, waiting, 'running', '上一轮因 API 错误中断。从中断处继续完成任务。')))
-    }
+    const wait = errors * 30_000
+    const retryAt = (await $.clock.now()) + wait
+    const waiting = await patch($, task, { status: 'deciding', turns, errors, retryAt, note: `API 错误，${errors * 30}s 后重试` })
+    if (waiting !== undefined) $.clock.after(wait, () => detach($, inFlight($, waiting, () => resumeStep($, waiting))))
     return
   }
   const deciding = await patch($, task, { status: 'deciding', turns, errors: 0, lastAnswer: tail(end.answer, 4000), note: undefined })
@@ -444,6 +447,11 @@ async function notePausedTurn($: Engine, task: SuperviseTask, end: TurnEnd): Pro
 async function resumeStep($: Engine, task: SuperviseTask): Promise<void> {
   if (task.status === 'verifying' || task.status === 'reviewing') return verify($, task, '重新验收（上一次被重载打断）')
   if (task.status !== 'deciding' && task.status !== 'paused') return
+  // Waiting out an API error is no decision: what was decided is the retry, and its time has come (or a resume calls it now).
+  if (task.status === 'deciding' && task.retryAt !== undefined) {
+    await send($, task, 'running', '上一轮因 API 错误中断。从中断处继续完成任务。')
+    return
+  }
   // The turn in flight decides at its own turn.complete; deciding now would read half a turn and queue a second.
   if (task.status === 'paused' && (await read($, WORKER_TURN)) !== null) {
     await patch($, task, { status: 'running', note: '已恢复：等 Worker 这一轮结束后再决策' })
