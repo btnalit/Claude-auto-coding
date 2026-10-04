@@ -174,7 +174,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 - 状态：`$.state`（`auto-coding.task`、`auto-coding.denials`、`auto-coding.events`、`auto-coding.isBandHidden`、`auto-coding.workerTurn`），类型契约在 `types/index.d.ts`
 - 每次状态迁移递增 `seq`；异步步骤写回前核对 `seq`，被暂停/停止/重载超越的结果直接丢弃
 - `workerTurn` 记录主循环在途回合：Worker 这一轮还没结束就 resume 时，任务回到 `running`，等这一轮结束再决策，不会读半轮对话或排第二条指令；有回合在途时 `/supervise start` 会拒绝（`stop` 不打断正在跑的那一轮，等它结束再启动，免得新任务把旧回合当成自己的第 1 轮）。标记在 `turn.complete` 一开始就清除，`session.start`（首次加载或回合结束后的重载）和 `session.end` 也会清掉残留，不会让 resume 或 start 等一个永远不来的回合结束
-- 热重载：`session.start` 发现 `deciding/verifying/reviewing` 会自动重跑该步骤
+- 热重载：`session.start` 发现 `deciding/verifying/reviewing` 会自动重跑该步骤；`/supervise resume` 对这三个状态只在本环境没有在途步骤（即确实被重载打断）时才重跑，步骤还在跑时不会再并行跑一遍
 - 审计日志：`<git-dir>/auto-coding/<id>.jsonl`，记录 `task_started`、`status`、`decision`、`checks`、`review`、`worker_input`、`boundary_denied`
 
 ## 7. 已知限制与取舍

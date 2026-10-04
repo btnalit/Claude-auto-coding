@@ -42,7 +42,9 @@ function world(on: On, replies: Replies = {}) {
   const forkReleased = new Promise<void>(resolve => {
     releaseFork = resolve
   })
-  on('model.fork', async () => {
+  const forks: string[] = []
+  on('model.fork', async ($, e) => {
+    forks.push(e.prompt)
     if (replies.isForkHeld === true) await forkReleased
     return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
   })
@@ -65,7 +67,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, releaseFork }
+  return { clock, submitted, argvs, forks, releaseFork }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -381,6 +383,23 @@ test('a long decision keeps its action at the head of the log row and the stage'
   expect(stage?.text).toContain('verify')
   expect(stage?.text).not.toContain('xxxxxxxxxx')
   await ui.unmount()
+})
+
+test('a resume while a step still runs here does not run it a second time', async ($, on) => {
+  const w = world(on, { isForkHeld: true })
+  await startTask($, w, 'start refactor')
+  const ending = endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('决策中')
+
+  expect(await supervise($, 'resume')).toContain('仍在运行')
+  await w.clock.settle()
+  w.releaseFork()
+  await ending
+  await w.clock.settle()
+  expect(w.forks).toHaveLength(1)
+  expect(w.argvs.filter(line => line.startsWith('git diff --check'))).toHaveLength(1)
+  expect(await supervise($, 'status')).toContain('已完成')
 })
 
 test('a decision a pause overtook is never logged or acted on', async ($, on) => {

@@ -94,7 +94,7 @@ export const register: Register = (on, options) => {
       if (isWorking(task.status)) animate($)
       // A reload drops the step that was running; pick it up again.
       if (task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing') {
-        $.clock.after(1_000, () => detach($, resumeStep($, task)))
+        $.clock.after(1_000, () => detach($, inFlight(() => resumeStep($, task))))
       }
     }
     return next(e)
@@ -121,8 +121,10 @@ export const register: Register = (on, options) => {
     if (verb === 'resume') {
       const isStuck = task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing'
       if (task.status !== 'paused' && !isStuck) return { text: `任务 ${task.id} ${LABEL[task.status]}，不在暂停状态。` }
+      // Only a step a reload cut off is stuck; one still running here would run twice, side by side.
+      if (isStuck && stepsInFlight > 0) return { text: `任务 ${task.id} ${LABEL[task.status]}：这一步仍在运行，无需恢复。` }
       const isTurnRunning = task.status === 'paused' && (await read($, WORKER_TURN)) !== null
-      $.clock.after(0, () => detach($, resumeStep($, task)))
+      $.clock.after(0, () => detach($, inFlight(() => resumeStep($, task))))
       return {
         text: isTurnRunning
           ? `恢复 ${task.id}：Worker 这一轮还在进行，等这一轮结束后再决策。`
@@ -161,7 +163,7 @@ export const register: Register = (on, options) => {
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
-      await onWorkerTurn($, task, end)
+      await inFlight(() => onWorkerTurn($, task, end))
     } catch (error) {
       $.ui.log(`auto-coding: ${errorText(error)}`)
     }
@@ -342,6 +344,19 @@ function log($: Engine, task: SuperviseTask, type: string, detail?: unknown): Pr
 }
 
 // ---------------------------------------------------------------- the loop
+
+// Steps running in this environment. A reload starts it at 0: that is how a deciding, verifying
+// or reviewing task a reload cut off is told from one whose step is still at work.
+let stepsInFlight = 0
+
+async function inFlight(step: () => Promise<void>): Promise<void> {
+  stepsInFlight += 1
+  try {
+    await step()
+  } finally {
+    stepsInFlight -= 1
+  }
+}
 
 async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promise<void> {
   if (task.status === 'publishing') return finishPublish($, task)
@@ -606,7 +621,7 @@ async function pauseFromBand($: Engine): Promise<void> {
 
 async function resumeFromBand($: Engine): Promise<void> {
   const task = await read($, TASK)
-  if (task !== null && task.status === 'paused') await resumeStep($, task)
+  if (task !== null && task.status === 'paused') await inFlight(() => resumeStep($, task))
 }
 
 async function stopFromBand($: Engine): Promise<void> {
