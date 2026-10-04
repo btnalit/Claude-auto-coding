@@ -115,13 +115,14 @@ cd <仓库> && claude --bg -w <名字> --settings '{"worktree":{"baseRef":"head"
 任务  给 parser 加上空输入处理，并补测试
 ─●·─▶┆ Worker ┆────▶┆  决策  ┆────▶┆  验收  ┆────▶┆ Review ┆────▶┆  完成  ┆
      ┆◐ 第 2 轮┆     ┆ verify ┆     ┆ 1/2 ✗  ┆     ┆   —    ┆     ┆   —    ┆
-┆ 预算 · 验收            已运行 6m · 剩余 3h54m ┆
-┆ 轮次  ██░░░░░░░░░░░░░░░░░░  2/40              ┆
-┆ 检查  diff-check ✓  check-1 ✗ exit 1          ┆
-┆ 边界 · on guard  ◇ 合并  ◆ tag  ◇ 发版  ◇ 发布  ┆
+» 验收检查未通过：check-1
 │ session log                                  │
 │ 14:05:37  verify   check-1 失败（exit 1）      │
 │ 14:05:38  worker   修复轮 1/3：验收检查未通过   │  ← 最新一行高亮
+┆ 预算 · 验收            已运行 6m · 剩余 3h54m ┆
+┆ 轮次  ━━╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌  2/40              ┆
+┆ 检查  diff-check ✓  check-1 ✗ exit 1          ┆
+┆ 边界 · on guard  ◇ 合并  ◆ tag  ◇ 发版  ◇ 发布  ┆
 ~/repo $ /supervise start 给 parser 加上空输入处理… █
 turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] [停止]
 ```
@@ -185,7 +186,8 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 - **任务绑定会话**：`/clear` 或退出即 `stopped`；同一会话一次一个任务，并行请用不同会话 + 不同 worktree。
 - **没有成本核算**：只有轮次和时间预算。
 - **会话里任何输入都会暂停自动推进**（包括中途补一句指导），需要 `/supervise resume`；在验收 / Review 中按 Esc 或模型调用超时同样进入 `paused`。
-- **交互会话尚未实测**（已实测的是 `-p`）：监督步骤在 `turn.complete` 里执行，Worker 回合结束后 spinner 会继续转，直到下一轮排上队——这是预期行为，不是卡住。
+- **Worker 回合结束后 spinner 会继续转一会儿**：监督步骤（决策、验收、Review）在 `turn.complete` 里执行，直到下一轮排上队或任务进入终态——这是预期行为，不是卡住。
+- **热重载**：交互会话（含后台会话）监视 `--plugin-dir`，改了插件源码会在回合结束时重载；进行中的步骤由 `session.start` 接着跑。审查插件自身时用 `scripts/auto.ps1`，它加载快照。
 
 ## 8. 开发与验证
 
@@ -198,7 +200,11 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 - `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
-已在真实引擎（2.1.289，Windows，`-p`）实测：一次通过闭环、检查失败 → 修复轮 → 通过、`git tag` 经 PowerShell 被拦截且 Reviewer 据拦截记录给出 `human`。
+已在真实引擎（2.1.289，Windows）实测：
+
+- `-p`：一次通过闭环、检查失败 → 修复轮 → 通过、`git tag` 经 PowerShell 被拦截且 Reviewer 据拦截记录给出 `human`。
+- 后台会话 + 面板：用本 mod 无人值守地审查本仓库（任务 T261004145555，约 24 分钟），`claude attach` 全程看面板推进；Worker 产出 `REVIEW.md` 并修复 5 个 P1，三项验收通过，独立 Review `pass`，结果已合并。
+- `scripts/auto.ps1`：真实启动（无对话框、mod 接到任务）、干跑、未信任仓库报错。
 
 ## 9. 目录
 
