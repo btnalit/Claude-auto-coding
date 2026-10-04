@@ -168,7 +168,7 @@ export const register: Register = (on, options) => {
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
-      await inFlight(() => onWorkerTurn($, task, end))
+      await inFlight(() => onWorkerTurn($, task, end, next.signal))
     } catch (error) {
       $.ui.log(`auto-coding: ${errorText(error)}`)
     }
@@ -363,7 +363,8 @@ async function inFlight(step: () => Promise<void>): Promise<void> {
   }
 }
 
-async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promise<void> {
+/** `signal` is the turn.complete dispatch's: it aborts when the person presses Esc during the steps. */
+async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd, signal: AbortSignal): Promise<void> {
   if (task.status === 'publishing') return finishPublish($, task)
   const turns = task.turns + 1
   await record($, 'worker', `第 ${turns} 轮结束${end.reason === 'answer' ? '' : `（${end.reason}）`}`, end.reason === 'answer' ? undefined : 'warn')
@@ -382,7 +383,7 @@ async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promi
     return
   }
   const deciding = await patch($, task, { status: 'deciding', turns, errors: 0, lastAnswer: tail(end.answer, 4000), note: undefined })
-  if (deciding !== undefined) await decide($, deciding)
+  if (deciding !== undefined) await decide($, deciding, signal)
 }
 
 /**
@@ -417,9 +418,9 @@ async function resumeStep($: Engine, task: SuperviseTask): Promise<void> {
   if (deciding !== undefined) await decide($, deciding)
 }
 
-async function decide($: Engine, task: SuperviseTask): Promise<void> {
+async function decide($: Engine, task: SuperviseTask, signal?: AbortSignal): Promise<void> {
   const now = await $.clock.now()
-  if (!hasBudget(task, now)) return verify($, task, '轮次或时间预算已用尽，做最终验收')
+  if (!hasBudget(task, now)) return verify($, task, '轮次或时间预算已用尽，做最终验收', undefined, signal)
   const decision = await askDecision($, task, now)
   void log($, task, 'decision', decision)
   // The panel logs a decision once the transition it causes is written: a decision a
@@ -433,7 +434,7 @@ async function decide($: Engine, task: SuperviseTask): Promise<void> {
     await patch($, task, { status: 'paused', note: decision.reason })
     return
   }
-  return verify($, task, decision.reason === '' ? undefined : `准备验收：${decision.reason}`, `verify：${decision.reason}`)
+  return verify($, task, decision.reason === '' ? undefined : `准备验收：${decision.reason}`, `verify：${decision.reason}`, signal)
 }
 
 async function askDecision($: Engine, task: SuperviseTask, now: number): Promise<Decision> {
@@ -456,12 +457,18 @@ async function askDecision($: Engine, task: SuperviseTask, now: number): Promise
   return { action: 'verify', reason: '决策步骤没有给出有效动作，直接验收' }
 }
 
-async function verify($: Engine, task: SuperviseTask, note?: string, decided?: string): Promise<void> {
+/** `signal`: the turn.complete dispatch's, when the step runs inside one. */
+async function verify($: Engine, task: SuperviseTask, note?: string, decided?: string, signal?: AbortSignal): Promise<void> {
   const verifying = await patch($, task, { status: 'verifying', note })
   if (verifying === undefined) return
   if (decided !== undefined) await record($, 'decide', decided)
   const checks = await runChecks($, verifying)
   void log($, verifying, 'checks', checks.map(({ id, command, isPassed, exitCode }) => ({ id, command, isPassed, exitCode })))
+  // Esc while the checks ran: a check it cut short says nothing of the work, and the person took over.
+  if (signal?.aborted === true) {
+    await patch($, verifying, { status: 'paused', note: '验收被中断；/supervise resume 重新验收' })
+    return
+  }
   const checked = await patch($, verifying, { lastChecks: checks })
   if (checked === undefined) return
   const failed = checks.filter(check => !check.isPassed)

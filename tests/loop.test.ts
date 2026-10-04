@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import type { Engine, Plugin } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 // The test's hooks stand for the engine beneath the mod: git answers from a
@@ -14,7 +14,7 @@ const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
 /** An answer whose turn.complete fails beneath the mod. */
 const CORE_FAILS = 'core fails'
 
-type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean }
+type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean; isCheckHeld?: boolean }
 
 function world(on: On, replies: Replies = {}) {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 4, 8) })
@@ -24,14 +24,22 @@ function world(on: On, replies: Replies = {}) {
   const run = (stdout: string, exitCode = 0) => ({
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
-  on('process.run', ($, e) => {
+  // A held check answers only once the test releases it, so the test can act while the checks run.
+  let releaseCheck = () => {}
+  const checkReleased = new Promise<void>(resolve => {
+    releaseCheck = resolve
+  })
+  on('process.run', async ($, e) => {
     const line = e.argv.join(' ')
     argvs.push(line)
     if (line === 'git rev-parse --show-toplevel') return run('D:/repo\n')
     if (line === 'git rev-parse HEAD') return run('abc1234\n')
     if (line === 'git rev-parse --absolute-git-dir') return run('D:/repo/.git\n')
     if (line.startsWith('git symbolic-ref')) return run('feat/x\n')
-    if (line.startsWith('git diff --check')) return run('', replies.checkExit ?? 0)
+    if (line.startsWith('git diff --check')) {
+      if (replies.isCheckHeld === true) await checkReleased
+      return run('', replies.checkExit ?? 0)
+    }
     return run('')
   })
   on('fs.exists', () => ({ value: false }))
@@ -67,7 +75,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, forks, releaseFork }
+  return { clock, submitted, argvs, forks, releaseFork, releaseCheck }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -364,6 +372,36 @@ test('a review cut short pauses the task instead of parking it', async ($, on) =
   const status = await supervise($, 'status')
   expect(status).toContain('已暂停')
   expect(status).toContain('Review 被中断或超时')
+})
+
+/** Settles turn.complete a second after it starts while the hooks beneath still run: the dispatch is abandoned, as Esc does. */
+const IMPATIENT = {
+  name: 'impatient',
+  tier: 'prepend',
+  register(on) {
+    on('turn.complete', async ($, e, next) => {
+      void next(e).catch(() => undefined)
+      await $.clock.sleep(1_000)
+      return { text: e.answer }
+    })
+  },
+} as const satisfies Plugin
+
+test('Esc during the checks pauses the task instead of sending a repair turn', { plugins: [IMPATIENT] }, async ($, on) => {
+  const w = world(on, { checkExit: 2, isCheckHeld: true })
+  await startTask($, w, 'start refactor')
+  const ending = endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('验收检查中')
+
+  await w.clock.advance(1_000)
+  await ending
+  w.releaseCheck()
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('验收被中断')
+  expect(w.submitted).toHaveLength(1)
 })
 
 test('the boundary denies merges and releases only while a task is active', async ($, on) => {
