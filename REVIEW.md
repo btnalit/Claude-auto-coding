@@ -32,7 +32,7 @@
 - 影响（已用测试复现，旧代码输出 `已完成 · 轮次 0/40`）：
   - 决策为 `verify`：在 Worker 还在改代码时跑检查、做 Review，任务进入 `completed`，`isActive` 变 false，**合并/发版硬边界在 Worker 回合仍在执行时被解除**；
   - 决策为 `continue`：`send()` 把第二条指令排在正在跑的回合后面；该回合结束时 `turn.complete` 看到 `running`，又决策并再排一条——之后始终有两条指令在途，预算消耗翻倍，决策基于错位的回合。
-- 修复：新增 `auto-coding.workerTurn`（`types/index.d.ts:88-92`）记录主循环在途回合：`turn.start` 写入（`register.tsx:137-141`；子 agent 不触发 `turn.start`），主循环 `turn.complete` 清空（`register.tsx:147`）。`resumeStep` 在「已暂停 + 有在途回合」时只把状态改回 `running`（等该回合的 `turn.complete` 正常决策），否则保持原逻辑；`/supervise resume` 的回复文字随之区分。用独立 atom 而不是写进 task：`patch` 会递增 `seq`，在 `turn.start` 里改 task 会让并行中的步骤被无谓作废；atom 也能跨热重载保留。
+- 修复：新增 `auto-coding.workerTurn`（`types/index.d.ts:88-92`）记录主循环在途回合：`turn.start` 写入（`register.tsx:137-141`；子 agent 不触发 `turn.start`），主循环 `turn.complete` 清空（`register.tsx:147`；清除点在第二轮改到 `next(e)` 之前并新增 `session.start`/`session.end` 两处，见 P2-11）。`resumeStep` 在「已暂停 + 有在途回合」时只把状态改回 `running`（等该回合的 `turn.complete` 正常决策），否则保持原逻辑；`/supervise resume` 的回复文字随之区分。用独立 atom 而不是写进 task：`patch` 会递增 `seq`，在 `turn.start` 里改 task 会让并行中的步骤被无谓作废；atom 也能跨热重载保留。
 - 测试：`tests/loop.test.ts`「a resume while the Worker turn still runs waits for that turn to end」：start → `turn.start` → pause → resume → 断言仍为 `Worker 工作中`、只提交过 1 条 prompt、没跑 `git diff --check`；回合结束后 → `已完成`、`轮次 1/40`。
 
 ### P1-2 `gh api graphql` 的合并/发版检测是死代码
@@ -111,7 +111,7 @@
 - 位置：`hooks/register.tsx:603-608`（`start` 只拒绝 active 的旧任务）
 - 问题：`/supervise stop` 明说「正在运行的这一轮不会被打断」，任务变 `stopped` 后 `start` 立即放行。旧回合结束时新任务处于 `running`，`turn.complete` 把它算作新任务的第 1 轮：`lastAnswer` 是旧任务的回复，决策若为 `continue` 会在已排队的启动 prompt 后面再排一条——与 P1-1 同形的双驱动，入口不同。
 - 建议：`start` 读 `auto-coding.workerTurn`，非空时回复「等这一轮结束再启动」。这会改变 `start` 的契约，本次只记录。
-- **状态：已修（`08f2e40`，与 P2-11 同一提交）**。按建议改了 `start` 的契约：有回合在途时拒绝，回复「会话里还有一轮在进行（/supervise stop 不会打断它）。等这一轮结束后再 /supervise start。」（`hooks/register.tsx:682-685`）。这个拒绝依赖标记不会残留，所以与 P2-11 一起修。`-p` 与 `scripts/auto.ps1` 的 start 是会话第一条输入，不受影响。测试「a start waits for the stopped task's turn instead of taking it as its own」：stop 后立即 start 被拒、没有提交新 prompt；旧回合结束后 start 成功，新任务 `轮次 0/40`。
+- **状态：已修（`08f2e40`，与 P2-11 同一提交）**。按建议改了 `start` 的契约：有回合在途时拒绝，回复「会话里还有一轮在进行（正在跑的回合不会被打断）。等这一轮结束后再 /supervise start。」（`hooks/register.tsx:682-685`）。这个拒绝依赖标记不会残留，所以与 P2-11 一起修。`-p` 与 `scripts/auto.ps1` 把 `/supervise start` 作为会话第一条输入，不受影响——已在真实引擎（2.1.289）用记录事件顺序的探针插件实测：`claude -p "/probe hello"` 只触发 `session.start → command.run`，没有 `prompt.submit` 和 `turn.start`；对照组普通提示词触发 `prompt.submit → turn.start → turn.complete`。测试「a start waits for the stopped task's turn instead of taking it as its own」：stop 后立即 start 被拒、没有提交新 prompt；旧回合结束后 start 成功，新任务 `轮次 0/40`。
 
 **P2-11 `workerTurn` 残留：恢复时等一个永远不来的 `turn.complete`**（独立 Review 补充）
 - 位置：`hooks/register.tsx:139-149`（基线 `5fd5296`：`turn.start` 写入、主循环 `turn.complete` 在 `await next(e)` 之后才清除、从不比对 turn id）
@@ -202,4 +202,5 @@
 | `claude plugin validate .` | 通过 |
 | `npx -p typescript tsc -p .` | 通过 |
 | `git diff --check` | 无输出 |
-| 真实引擎 | 未实测（本会话的监督器加载的是 `%TEMP%` 快照，不随工作区改动热重载） |
+| 真实引擎探针（2.1.289，`claude -p --plugin-dir <探针>`，探针已删除） | `"/probe hello"`：`session.start → command.run`，无 `prompt.submit`/`turn.start`（P2-10 的拒绝不会挡住 `-p`/`--bg` 的首条 `/supervise start`）；普通提示词：`session.start → prompt.submit → turn.start → turn.complete` |
+| 真实引擎跑修复后的完整任务 | 未实测（本会话的监督器加载的是 `%TEMP%` 快照，不随工作区改动热重载） |

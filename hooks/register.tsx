@@ -681,7 +681,7 @@ async function start($: Engine, settings: Settings, goal: string): Promise<{ tex
   }
   // The turn in flight (a stopped task's last, or the person's own) would end as this task's first turn.
   if ((await read($, WORKER_TURN)) !== null) {
-    return { text: '会话里还有一轮在进行（/supervise stop 不会打断它）。等这一轮结束后再 /supervise start。' }
+    return { text: '会话里还有一轮在进行（正在跑的回合不会被打断）。等这一轮结束后再 /supervise start。' }
   }
   let cwd: string
   try {
