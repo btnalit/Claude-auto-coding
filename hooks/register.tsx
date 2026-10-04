@@ -61,7 +61,8 @@ type Settings = {
 }
 
 function settingsOf(options: PluginOptions): Settings {
-  const count = (value: unknown, fallback: number) => (typeof value === 'number' && value > 0 ? Math.floor(value) : fallback)
+  // A positive budget is at least one: `maxTurns: 0.5` would floor to none and verify after the first turn.
+  const count = (value: unknown, fallback: number) => (typeof value === 'number' && value > 0 ? Math.max(1, Math.floor(value)) : fallback)
   const publish = options.publish
   return {
     reviewerModel: typeof options.reviewerModel === 'string' && options.reviewerModel !== '' ? options.reviewerModel : 'opus',

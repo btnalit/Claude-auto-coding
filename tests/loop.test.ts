@@ -127,6 +127,12 @@ test('a finished turn is verified, reviewed and completed', async ($, on) => {
   expect(w.argvs).toContain('git diff --check abc1234')
 })
 
+test('a positive budget below one is a budget of one', { options: { maxTurns: 0.5, maxRepairRounds: 0.5 } }, async ($, on) => {
+  const w = world(on)
+  expect(await startTask($, w, 'start refactor')).toContain('预算 1 轮')
+  expect(await supervise($, 'status')).toContain('轮次 0/1 · 修复 0/1')
+})
+
 test('a failed check sends a repair turn', async ($, on) => {
   const w = world(on, { checkExit: 2 })
   await startTask($, w, 'fix the bug')
