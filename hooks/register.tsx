@@ -44,6 +44,7 @@ const TASK = atom({ plugin: 'auto-coding', key: 'task' } as const, null)
 const BAND_HIDDEN = atom({ plugin: 'auto-coding', key: 'isBandHidden' } as const, false)
 const DENIALS = atom({ plugin: 'auto-coding', key: 'denials' } as const, [])
 const EVENTS = atom({ plugin: 'auto-coding', key: 'events' } as const, [])
+const WORKER_TURN = atom({ plugin: 'auto-coding', key: 'workerTurn' } as const, null)
 const PROJECT_CONFIG = '.claude/auto-coding.json'
 const PANE = 'auto-coding'
 const MAX_EVENTS = 40
@@ -115,8 +116,13 @@ export const register: Register = (on, options) => {
     if (verb === 'resume') {
       const isStuck = task.status === 'deciding' || task.status === 'verifying' || task.status === 'reviewing'
       if (task.status !== 'paused' && !isStuck) return { text: `任务 ${task.id} ${LABEL[task.status]}，不在暂停状态。` }
+      const isTurnRunning = task.status === 'paused' && (await read($, WORKER_TURN)) !== null
       $.clock.after(0, () => detach($, resumeStep($, task)))
-      return { text: `恢复 ${task.id}：决策步骤先读一遍当前对话，再决定继续还是验收。` }
+      return {
+        text: isTurnRunning
+          ? `恢复 ${task.id}：Worker 这一轮还在进行，等这一轮结束后再决策。`
+          : `恢复 ${task.id}：决策步骤先读一遍当前对话，再决定继续还是验收。`,
+      }
     }
     if (verb === 'stop') {
       if (!isActive(task.status)) return { text: `任务 ${task.id} 已经${LABEL[task.status]}。` }
@@ -128,10 +134,17 @@ export const register: Register = (on, options) => {
     return { text: '已清除。' }
   })
 
+  // Only the main loop raises turn.start: a resume waits for the turn in flight instead of deciding on half of it.
+  on('turn.start', async ($, e, next) => {
+    await update($, WORKER_TURN, () => e.turnId)
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     // A subagent's turn is the Worker's own business, not a Worker turn.
     if (e.agentId !== undefined) return result
+    await update($, WORKER_TURN, () => null)
     const task = await read($, TASK)
     if (task === null || (task.status !== 'running' && task.status !== 'publishing')) return result
     const end: TurnEnd = {
@@ -339,6 +352,11 @@ async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd): Promi
 async function resumeStep($: Engine, task: SuperviseTask): Promise<void> {
   if (task.status === 'verifying' || task.status === 'reviewing') return verify($, task, '重新验收（上一次被重载打断）')
   if (task.status !== 'deciding' && task.status !== 'paused') return
+  // The turn in flight decides at its own turn.complete; deciding now would read half a turn and queue a second.
+  if (task.status === 'paused' && (await read($, WORKER_TURN)) !== null) {
+    await patch($, task, { status: 'running', note: '已恢复：等 Worker 这一轮结束后再决策' })
+    return
+  }
   const deciding = await patch($, task, { status: 'deciding', note: undefined })
   if (deciding !== undefined) await decide($, deciding)
 }

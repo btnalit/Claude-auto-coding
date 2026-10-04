@@ -150,8 +150,9 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 
 ## 6. 状态与审计
 
-- 状态：`$.state`（`auto-coding.task`、`auto-coding.denials`、`auto-coding.isBandHidden`），类型契约在 `types/index.d.ts`
+- 状态：`$.state`（`auto-coding.task`、`auto-coding.denials`、`auto-coding.events`、`auto-coding.isBandHidden`、`auto-coding.workerTurn`），类型契约在 `types/index.d.ts`
 - 每次状态迁移递增 `seq`；异步步骤写回前核对 `seq`，被暂停/停止/重载超越的结果直接丢弃
+- `workerTurn` 记录主循环在途回合：Worker 这一轮还没结束就 resume 时，任务回到 `running`，等这一轮结束再决策，不会读半轮对话或排第二条指令
 - 热重载：`session.start` 发现 `deciding/verifying/reviewing` 会自动重跑该步骤
 - 审计日志：`<git-dir>/auto-coding/<id>.jsonl`，记录 `task_started`、`status`、`decision`、`checks`、`review`、`worker_input`、`boundary_denied`
 
@@ -173,8 +174,8 @@ claude plugin validate D:\Claude-auto-coding   # manifest、hooks、state 契约
 claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 ```
 
-- `tests/policy.test.ts`：边界放行/拒绝两侧 55 条用例
-- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
+- `tests/policy.test.ts`：边界放行/拒绝两侧 65 条用例
+- `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、动画只在 working 时重绘、边界只在任务期间生效
 - 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
 
 已在真实引擎（2.1.289，Windows，`-p`）实测：一次通过闭环、检查失败 → 修复轮 → 通过、`git tag` 经 PowerShell 被拦截且 Reviewer 据拦截记录给出 `human`。

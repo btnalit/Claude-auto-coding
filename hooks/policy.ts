@@ -14,6 +14,8 @@ const SEPARATORS = /&&|\|\||\$\(|[;&|\n\r(){}`]/
 
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec'])
+const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell'])
 const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
 
 const PUBLISHERS: Record<string, (words: string[]) => boolean> = {
@@ -40,9 +42,10 @@ const PUBLISHERS: Record<string, (words: string[]) => boolean> = {
 
 /** Returns why the command crosses the boundary, or undefined when it does not. */
 export function checkCommand(command: string, context: BoundaryContext): string | undefined {
+  const data = stripData(command)
   let branch = context.branch
-  for (const tokens of segments(stripData(command))) {
-    const reason = checkSegment(tokens, { ...context, branch })
+  for (const tokens of segments(data)) {
+    const reason = checkSegment(tokens, { ...context, branch }, data)
     if (reason !== undefined) return reason
     branch = switchedTo(tokens) ?? branch
   }
@@ -74,7 +77,8 @@ export function stripData(command: string): string {
     }
     kept.push(line)
     const heredoc = /<<-?\s*(['"]?)(\w+)\1/.exec(line)
-    if (heredoc !== null && !/\b(sh|bash|zsh|dash|pwsh|powershell)\s*<</.test(line)) terminator = heredoc[2]
+    // A body a shell reads is commands wherever the shell sits on the line: `bash -s <<EOF`, `cat <<EOF | bash`.
+    if (heredoc !== null && !line.split(/[\s|'"]+/).some(word => SHELLS.has(programOf(word)))) terminator = heredoc[2]
   }
   return kept
     .join('\n')
@@ -99,7 +103,8 @@ function isVersionBump(words: string[]): boolean {
   return words[0] === 'version' && words.length > 1
 }
 
-function checkSegment(tokens: string[], context: BoundaryContext): string | undefined {
+/** `command` is the whole command as checked, for what the statement split cuts apart. */
+function checkSegment(tokens: string[], context: BoundaryContext, command: string): string | undefined {
   // Only the first program the boundary knows in a statement: `git commit -m "git merge"` is a commit.
   const at = tokens.findIndex(t => {
     const p = programOf(t)
@@ -109,7 +114,7 @@ function checkSegment(tokens: string[], context: BoundaryContext): string | unde
   const program = programOf(tokens[at] ?? '')
   const args = tokens.slice(at + 1)
   if (program === 'git') return checkGit(args, context)
-  if (program === 'gh') return checkGh(args, context)
+  if (program === 'gh') return checkGh(args, context, command)
   const words = args.filter(a => !a.startsWith('-'))
   return PUBLISHERS[program]?.(words) === true ? `发布制品（${program} ${words.join(' ')}）` : undefined
 }
@@ -175,6 +180,9 @@ function checkPush(rest: string[], context: BoundaryContext): string | undefined
     if (!arg.startsWith('-')) positional.push(arg)
   }
   const refspecs = positional.slice(1)
+  // `tag <name>` is git's shorthand for refs/tags/<name>:refs/tags/<name>.
+  const tag = refspecs.indexOf('tag')
+  if (tag !== -1) return `git push 推送 tag ${refspecs[tag + 1] ?? ''}`.trimEnd()
   if (refspecs.length === 0) {
     return isProtected(context.branch, context.protectedBranches)
       ? `直接推送受保护分支 ${context.branch}（等同绕过 PR 合并）`
@@ -194,13 +202,21 @@ function checkPush(rest: string[], context: BoundaryContext): string | undefined
   return undefined
 }
 
-function checkGh(args: string[], context: BoundaryContext): string | undefined {
-  const [group, sub] = args
+function checkGh(args: string[], context: BoundaryContext, command: string): string | undefined {
+  // gh takes the repository before the group too: `gh -R o/r pr merge 3` is `gh pr merge`.
+  let i = 0
+  for (let arg = args[i]; arg !== undefined && arg.startsWith('-'); arg = args[i]) {
+    i += GH_OPTIONS_WITH_VALUE.has(arg) ? 2 : 1
+  }
+  const [group, sub] = args.slice(i)
   if (group === 'pr' && sub === 'merge') return 'gh pr merge'
   if (group === 'release' && ['create', 'upload', 'edit', 'delete', 'delete-asset'].includes(sub ?? '')) return `gh release ${sub}`
   if (group !== 'api') return undefined
   const text = args.join(' ')
-  if (/mergePullRequest|enablePullRequestAutoMerge|createRelease|updateRelease|createRef/.test(text)) return 'gh api graphql 合并或发版操作'
+  // A GraphQL body's braces split it off this statement, so the mutation is looked for in the whole command.
+  if (/mergePullRequest|enablePullRequestAutoMerge|mergeBranch|createRelease|updateRelease|createRef/.test(command)) {
+    return 'gh api graphql 合并或发版操作'
+  }
   const isMutation = /(^|\s)(-X|--method|-f|-F|--field|--raw-field|--input)(\s|=|$)/.test(text) && !/(-X|--method)[\s=]+GET\b/i.test(text)
   if (!isMutation) return undefined
   if (/\/pulls\/\d+\/merge\b|\/merges\b/.test(text)) return 'gh api 合并 PR'

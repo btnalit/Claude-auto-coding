@@ -27,6 +27,9 @@ describe('allowed: push, PR and ordinary work', () => {
     ['docker build -t app .', onFeature],
     ['gh api repos/o/r/pulls/3/merge', onFeature],
     ['git merge --abort', onMain],
+    ["gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }'", onFeature],
+    ['gh -R o/r pr view 3', onFeature],
+    ["git commit -F - <<'EOF'\nchore: notes\ngit push origin main\nEOF", onMain],
   ]
   for (const [command, context] of allowed) {
     test(`allows: ${command.split('\n')[0]}`, () => {
@@ -73,6 +76,13 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['C:\\Program Files\\Git\\cmd\\git.exe push origin main', onFeature],
     ['& git.exe push origin main', onFeature],
     ["bash <<'EOF'\ngit push --tags\nEOF", onFeature],
+    ["gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }'", onFeature],
+    ["gh api graphql -f query='mutation { mergeBranch(input: {repositoryId: \"R_1\", base: \"main\", head: \"feat\"}) { clientMutationId } }'", onFeature],
+    ['gh -R o/r pr merge 3 --squash', onFeature],
+    ['gh --repo o/r release create v1.4.0', onFeature],
+    ['git push origin tag rc-final', onFeature],
+    ["bash -s <<'EOF'\ngit push origin main\nEOF", onFeature],
+    ["cat <<'EOF' | bash\ngit push --tags\nEOF", onFeature],
   ]
   for (const [command, context] of denied) {
     test(`denies: ${command.split('\n')[0]}`, () => {

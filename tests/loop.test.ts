@@ -45,6 +45,7 @@ function world(on: On, replies: Replies = {}) {
     submitted.push(e.text)
     return { text: e.text }
   })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
@@ -143,6 +144,26 @@ test('an interrupted turn pauses the task until resume', async ($, on) => {
   await supervise($, 'resume')
   await w.clock.settle()
   expect(await supervise($, 'status')).toContain('已完成')
+})
+
+test('a resume while the Worker turn still runs waits for that turn to end', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  expect(await supervise($, 'resume')).toContain('这一轮结束')
+  await w.clock.settle()
+
+  // No decision on half a turn: nothing verified, no second instruction queued behind the running turn.
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+  expect(w.submitted).toHaveLength(1)
+  expect(w.argvs.some(line => line.startsWith('git diff --check'))).toBe(false)
+
+  await endTurn($, 'done, committed')
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已完成')
+  expect(status).toContain('轮次 1/40')
 })
 
 const BAND = {
