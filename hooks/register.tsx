@@ -526,13 +526,14 @@ async function collectEvidence($: Engine, task: SuperviseTask): Promise<string> 
   const commits = await gitOrEmpty($, task.cwd, task.baseline === EMPTY_TREE ? ['log', '--oneline', '-n', '50'] : ['log', '--oneline', `${task.baseline}..HEAD`])
   const stat = await gitOrEmpty($, task.cwd, ['diff', '--stat', task.baseline])
   const diff = await gitOrEmpty($, task.cwd, ['diff', task.baseline])
-  const status = await gitOrEmpty($, task.cwd, ['status', '--porcelain', '--untracked-files=all'])
+  const status = await gitOrEmpty($, task.cwd, ['status', '--porcelain', '-z', '--untracked-files=all'])
   const sections = [
     `## Commits since baseline\n${commits.stdout.trim() || '(none)'}`,
     `## git diff --stat\n${stat.stdout.trim() || '(no tracked changes)'}`,
     diffSection(diff.stdout),
   ]
   const untracked = untrackedPaths(status.stdout)
+  const unread: string[] = []
   let budget = MAX_UNTRACKED_TOTAL
   for (const [i, path] of untracked.entries()) {
     if (budget <= 0) {
@@ -543,6 +544,7 @@ async function collectEvidence($: Engine, task: SuperviseTask): Promise<string> 
     try {
       text = String(await $.fs.read(`${task.cwd}/${path}`))
     } catch {
+      unread.push(path)
       continue
     }
     if (text.includes('\u0000')) {
@@ -554,6 +556,8 @@ async function collectEvidence($: Engine, task: SuperviseTask): Promise<string> 
     const cut = shown.length < text.length ? ` (TRUNCATED: ${shown.length} of ${text.length} characters shown)` : ''
     sections.push(`## Untracked file ${path}${cut}\n${shown}`)
   }
+  // A file the Supervisor could not read is still named: the Reviewer should know it exists.
+  if (unread.length > 0) sections.push(`## Untracked files that could not be read (not shown)\n${unread.join('\n')}`)
   return sections.join('\n\n')
 }
 

@@ -14,7 +14,16 @@ const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
 /** An answer whose turn.complete fails beneath the mod. */
 const CORE_FAILS = 'core fails'
 
-type Replies = { decision?: string; review?: string; checkExit?: number; isReviewAborted?: boolean; isForkHeld?: boolean; isCheckHeld?: boolean }
+type Replies = {
+  decision?: string
+  review?: string
+  checkExit?: number
+  isReviewAborted?: boolean
+  isForkHeld?: boolean
+  isCheckHeld?: boolean
+  /** What `git status` prints. */
+  status?: string
+}
 
 function world(on: On, replies: Replies = {}) {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 4, 8) })
@@ -40,6 +49,7 @@ function world(on: On, replies: Replies = {}) {
       if (replies.isCheckHeld === true) await checkReleased
       return run('', replies.checkExit ?? 0)
     }
+    if (line.startsWith('git status')) return run(replies.status ?? '')
     return run('')
   })
   on('fs.exists', () => ({ value: false }))
@@ -56,11 +66,13 @@ function world(on: On, replies: Replies = {}) {
     if (replies.isForkHeld === true) await forkReleased
     return { value: { isAnswered: true, text: replies.decision ?? VERIFY, usage: USAGE } }
   })
-  on('model.complete', () =>
-    replies.isReviewAborted === true
+  const reviews: string[] = []
+  on('model.complete', ($, e) => {
+    reviews.push(e.prompt)
+    return replies.isReviewAborted === true
       ? { value: { isAnswered: false, reason: 'aborted', usage: USAGE } }
-      : { value: { isAnswered: true, text: replies.review ?? PASS, usage: USAGE } },
-  )
+      : { value: { isAnswered: true, text: replies.review ?? PASS, usage: USAGE } }
+  })
   on('prompt.submit', ($, e) => {
     submitted.push(e.text)
     return { text: e.text }
@@ -75,7 +87,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, forks, releaseFork, releaseCheck }
+  return { clock, submitted, argvs, forks, reviews, releaseFork, releaseCheck }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -124,6 +136,20 @@ test('a failed check sends a repair turn', async ($, on) => {
   expect(await supervise($, 'status')).toContain('Worker 工作中')
   expect(w.submitted.at(-1)).toContain('第 1/3 轮修复')
   expect(w.submitted.at(-1)).toContain('diff-check')
+})
+
+test('the reviewer is told of every untracked file, whatever its name, even one it cannot read', async ($, on) => {
+  // `-z` output: NUL-separated, never quoted; a rename carries its source as a field of its own.
+  const w = world(on, { status: 'R  src/renamed.ts\0src/original.ts\0?? 说明.md\0?? src/new.ts\0' })
+  await startTask($, w, 'start add notes')
+  await endTurn($, 'done')
+  await w.clock.settle()
+
+  const review = w.reviews.at(-1) ?? ''
+  expect(review).toContain('说明.md')
+  expect(review).toContain('src/new.ts')
+  expect(review).not.toContain('src/original.ts')
+  expect(w.argvs).toContain('git status --porcelain -z --untracked-files=all')
 })
 
 test('a revise verdict sends the findings back', async ($, on) => {

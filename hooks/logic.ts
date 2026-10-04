@@ -194,12 +194,20 @@ ${task.lastAnswer ?? '(no report)'}
 """`
 }
 
-/** Paths `git status --porcelain` lists as untracked. */
+/**
+ * Paths `git status --porcelain -z` lists as untracked. `-z` separates entries with NUL and never
+ * quotes a path, so `说明.md` comes through as itself rather than as octal escapes.
+ */
 export function untrackedPaths(porcelain: string): string[] {
-  return porcelain
-    .split('\n')
-    .filter(line => line.startsWith('?? '))
-    .map(line => line.slice(3).trim().replace(/^"(.*)"$/, '$1'))
+  const entries = porcelain.split('\0')
+  const paths: string[] = []
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i] ?? ''
+    if (entry.startsWith('?? ')) paths.push(entry.slice(3))
+    // A rename or a copy carries its source path as the next entry.
+    else if (/^([RC]|.[RC])/.test(entry)) i += 1
+  }
+  return paths
 }
 
 export function parseReview(text: string): SuperviseReview | { error: string } {
