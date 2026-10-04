@@ -120,7 +120,7 @@ cd <仓库> && claude --bg -w <名字> --settings '{"worktree":{"baseRef":"head"
 │ 14:05:37  verify   check-1 失败（exit 1）      │
 │ 14:05:38  worker   修复轮 1/3：验收检查未通过   │  ← 最新一行高亮
 ┆ 预算 · 验收            已运行 6m · 剩余 3h54m ┆
-┆ 轮次  ━━╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌  2/40              ┆
+┆ 轮次  ██░░░░░░░░░░░░░░░░░░  2/40              ┆
 ┆ 检查  diff-check ✓  check-1 ✗ exit 1          ┆
 ┆ 边界 · on guard  ◇ 合并  ◆ tag  ◇ 发版  ◇ 发布  ┆
 ~/repo $ /supervise start 给 parser 加上空输入处理… █

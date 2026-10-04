@@ -110,7 +110,7 @@ export function wireCells(cells: number, frame?: number): string {
 
 export function barCells(fraction: number, width: number): { fill: string; rest: string } {
   const filled = Math.max(0, Math.min(width, Math.round(fraction * width)))
-  return { fill: '━'.repeat(filled), rest: '╌'.repeat(width - filled) }
+  return { fill: '█'.repeat(filled), rest: '░'.repeat(width - filled) }
 }
 
 /** live-panel's gauges flip colour past a threshold: here 75% of a budget, and red once it is spent. */
@@ -269,7 +269,8 @@ function Gauge(el: ElementTable, key: string, label: string, fraction: number, b
     <Box key={key}>
       <Text color={TOKENS.mute}>{padCells(label, 6)}</Text>
       <Text color={budgetColor(fraction, base)}>{fill}</Text>
-      <Text color={TOKENS.dots}>{rest}</Text>
+      {/* A dark track, so the filled part reads as progress and the rows do not merge into one grey block. */}
+      <Text color={TOKENS.line2}>{rest}</Text>
       <Text color={fraction >= 0.75 ? budgetColor(fraction, base) : TOKENS.fg} bold={fraction >= 0.75}>
         {`  ${value}`}
       </Text>
