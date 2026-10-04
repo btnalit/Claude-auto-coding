@@ -1,0 +1,5 @@
+# Laid by the engine at every load: this build's API declarations and a tsconfig
+.claude-plugin/types/
+# Written by the engine too; it extends the folder above
+tsconfig.json
+node_modules/

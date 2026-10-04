@@ -1,0 +1,47 @@
+{
+  "name": "auto-coding",
+  "version": "0.1.0",
+  "author": { "name": "btnalit" },
+  "description": "Unattended development supervisor: Worker turn -> decision -> acceptance checks -> independent review -> repair or done; merges and releases are blocked.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "reviewerModel": {
+      "type": "string",
+      "title": "Reviewer model",
+      "description": "Model for the independent review of each candidate.",
+      "default": "opus",
+      "options": ["opus", "sonnet", "haiku"]
+    },
+    "maxTurns": {
+      "type": "number",
+      "title": "Max Worker turns",
+      "description": "Worker turns per task, repair turns included; past it the task is verified once and ends.",
+      "default": 40
+    },
+    "maxRepairRounds": {
+      "type": "number",
+      "title": "Max repair rounds",
+      "description": "Repair turns sent after failed checks or a revise verdict before the task is parked as blocked.",
+      "default": 3
+    },
+    "deadlineMinutes": {
+      "type": "number",
+      "title": "Deadline (minutes)",
+      "description": "Wall-clock budget per task; past it no new turn starts, the work is verified and the task ends.",
+      "default": 240
+    },
+    "protectedBranches": {
+      "type": "string",
+      "title": "Protected branches",
+      "description": "Comma-separated; a trailing * matches a prefix (release/*). Merging into them or pushing them directly is denied.",
+      "default": "main,master"
+    },
+    "publish": {
+      "type": "string",
+      "title": "After a passing review",
+      "description": "none keeps a verified local candidate; push has the Worker push its branch; pr also opens a pull request (never merged).",
+      "default": "none",
+      "options": ["none", "push", "pr"]
+    }
+  }
+}
