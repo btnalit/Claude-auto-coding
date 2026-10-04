@@ -132,6 +132,9 @@ export function padCells(text: string, cells: number): string {
   return text + ' '.repeat(Math.max(0, cells - width))
 }
 
+/** A row's text on one row: a pasted multi-line goal or a model's multi-line reason would add rows. */
+export const oneLine = (text: string): string => text.replace(/\s*[\r\n]+\s*/g, ' ')
+
 export function clockOf(at: number): string {
   const d = new Date(at)
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':')
@@ -196,9 +199,9 @@ function Runs(el: ElementTable, runs: readonly Run[], key?: string) {
   const { Text } = el
   return (
     <Text key={key} wrap="truncate-end">
-      {runs.map(r => (
-        <Text color={r.color} bold={r.isBold === true}>
-          {r.text}
+      {runs.map((r, i) => (
+        <Text key={i} color={r.color} bold={r.isBold === true}>
+          {oneLine(r.text)}
         </Text>
       ))}
     </Text>
@@ -361,7 +364,7 @@ function Rail(el: ElementTable, denials: readonly string[]) {
         )}
       </Box>
       <Text color={last === undefined ? TOKENS.dim : TOKENS.ye} wrap="truncate-end">
-        {last === undefined ? 'silent on every routine command' : `» ${last.replace(/^\w+: /, '')}`}
+        {last === undefined ? 'silent on every routine command' : `» ${oneLine(last.replace(/^\w+: /, ''))}`}
       </Text>
     </Box>
   )
@@ -370,6 +373,14 @@ function Rail(el: ElementTable, denials: readonly string[]) {
 function Log(el: ElementTable, events: readonly SuperviseEvent[], rows: number) {
   const { Box, Text } = el
   const shown = events.slice(-rows)
+  // A row's key is its event's time, counted among events of the same millisecond: an index would
+  // name another event once the log is full and drops its oldest.
+  const sameMoment = new Map<number, number>()
+  const keys = shown.map(event => {
+    const n = sameMoment.get(event.at) ?? 0
+    sameMoment.set(event.at, n + 1)
+    return `log-${event.at}-${n}`
+  })
   return (
     <Box key="log" flexDirection="column" borderStyle="single" borderColor={TOKENS.line2} paddingX={1}>
       <Text color={TOKENS.dim}>session log</Text>
@@ -386,7 +397,7 @@ function Log(el: ElementTable, events: readonly SuperviseEvent[], rows: number) 
               { text: event.who.padEnd(9), color: ROLE_COLOR[event.who], isBold: isNewest },
               { text: event.text, color: isNewest ? (toneColor ?? TOKENS.wh) : TOKENS.dim, isBold: isNewest },
             ],
-            `log-${events.length - shown.length + i}`,
+            keys[i],
           )
         })
       )}
@@ -508,11 +519,11 @@ export function drawBand(el: ElementTable, model: PanelModel) {
         ])}
       </Box>
       <Text color={TOKENS.mute} wrap="truncate-end">
-        {task.goal}
+        {oneLine(task.goal)}
       </Text>
       {task.note === undefined ? undefined : (
         <Text color={STATUS_COLOR[task.status]} wrap="truncate-end">
-          {`» ${task.note}`}
+          {`» ${oneLine(task.note)}`}
         </Text>
       )}
       <Box columnGap={1}>{buttons}</Box>

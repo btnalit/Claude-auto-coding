@@ -335,6 +335,14 @@ test('the band draws the task on every surface and its buttons act on it', async
   await ui.unmount()
 })
 
+test('a multi-line goal is drawn on one row', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start add a login page\n\nand a logout button')
+  const ui = await $.ui.mount({ plugin: 'auto-coding', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /add a login page and a logout button/ })).toBeDefined()
+  await ui.unmount()
+})
+
 const pane = (bodyColumns: number) =>
   ({
     component: 'Pane',
