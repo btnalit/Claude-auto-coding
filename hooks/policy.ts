@@ -35,8 +35,8 @@ const PUBLISHERS: Record<string, (words: string[], args: string[]) => boolean> =
   twine: w => w.includes('upload'),
   gem: w => w.includes('push'),
   dotnet: w => w.includes('nuget') && w.includes('push'),
-  docker: w => w[0] === 'push',
-  podman: w => w[0] === 'push',
+  docker: isImagePush,
+  podman: isImagePush,
   vsce: w => w.includes('publish'),
   ovsx: w => w.includes('publish'),
   lerna: w => w.includes('publish') || w.includes('version'),
@@ -128,6 +128,14 @@ function programOf(token: string): string {
 
 function isVersionBump(words: string[]): boolean {
   return words[0] === 'version' && words.length > 1
+}
+
+/** `push`, `image push`, `manifest push`, or a build that pushes what it builds (`buildx build --push`). */
+function isImagePush(words: string[], args: string[]): boolean {
+  if (words[0] === 'push') return true
+  if ((words[0] === 'image' || words[0] === 'manifest') && words[1] === 'push') return true
+  const isBuild = words[0] === 'build' || (words[0] === 'buildx' && (words[1] === 'build' || words[1] === 'bake'))
+  return isBuild && args.some(a => a === '--push' || /\b(push=true|type=registry)\b/.test(a))
 }
 
 /** `command` is the whole command as checked, for what the statement split cuts apart. */
