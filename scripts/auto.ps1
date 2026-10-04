@@ -89,7 +89,8 @@ if ($LASTEXITCODE -eq 0 -and $pluginTop -and (Same-Path ($pluginTop | Select-Obj
   # The Worker will edit this very plugin: load a snapshot of HEAD, so its edits never reload the supervisor.
   $sha = (& git -C $top rev-parse --short HEAD).Trim()
   $snapshot = Join-Path $env:TEMP "auto-coding-plugin-$sha"
-  if (-not (Test-Path (Join-Path $snapshot '.claude-plugin\plugin.json'))) {
+  # A dry run only names the snapshot the real run would load; it makes and prunes nothing.
+  if (-not $DryRun -and -not (Test-Path (Join-Path $snapshot '.claude-plugin\plugin.json'))) {
     New-Item -ItemType Directory -Force -Path $snapshot | Out-Null
     $archive = "auto-coding-plugin-$sha.tar"
     # Windows' own tar first: a GNU tar earlier on PATH (Git's) reads "C:" as a remote host,
@@ -112,7 +113,7 @@ if ($LASTEXITCODE -eq 0 -and $pluginTop -and (Same-Path ($pluginTop | Select-Obj
   # so those go, with any archive a failed unpack left; the one this task loads stays.
   $cutoff = (Get-Date).AddDays(-1)
   Get-ChildItem -Path $env:TEMP -Filter 'auto-coding-plugin-*' -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -ne $snapshot -and $_.LastWriteTime -lt $cutoff } |
+    Where-Object { -not $DryRun -and $_.FullName -ne $snapshot -and $_.LastWriteTime -lt $cutoff } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
@@ -180,7 +181,9 @@ Write-Host "  会话      $id"
 Write-Host "  worktree  $worktree（分支 worktree-$Name）"
 Write-Host "  看面板    claude attach $id"
 Write-Host "  看输出    claude logs $id"
-Write-Host "  结束      claude stop $id  ；清理会话和 worktree：claude rm $id"
+Write-Host "  结束      claude stop $id"
+# `claude rm` refuses while the stopped session's process is still exiting (its lock names a live pid).
+Write-Host "  清理      等 stop 后的进程退出（几秒），再 claude rm $id ：删会话和 worktree"
 
 if ($Attach) {
   Push-Location $top

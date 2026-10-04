@@ -19,7 +19,10 @@ const REBASE_OPTIONS_WITH_VALUE = new Set(['--onto', '-s', '--strategy', '-X', '
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
 const GRAPHQL = /\bgh\b.*\bgraphql\b/
 // `v1.2.3`, `1.2.3-rc.1`, `1.2.3+build`; not a maintenance branch such as `2.0.x`.
-const TAG_LIKE = /^v?\d+(\.\d+)+([-+].*)?$/
+// A version, with any suffix (v1.4.0, 1.2-rc1, v1.2.3.Final); a maintenance branch (2.0.x, 1.x, 3.*) is not one.
+const TAG_LIKE = /^v?\d+(\.\d+)+([-+.][0-9A-Za-z].*)?$/
+const MAINTENANCE_BRANCH = /^v?\d+(\.\d+)*\.[xX*]$/
+const isTagLike = (name: string): boolean => TAG_LIKE.test(name) && !MAINTENANCE_BRANCH.test(name)
 const YARN_BUMP = /^--(major|minor|patch|premajor|preminor|prepatch|prerelease|new-version)(=|$)/
 
 /** `words` are the arguments that are not flags; `args` all of them. */
@@ -233,7 +236,7 @@ function checkPush(rest: string[], context: BoundaryContext): string | undefined
     // HEAD is the branch checked out: pushing it is a branch push, whatever its name looks like (`3.11`).
     const isHead = target === 'HEAD' || target === '@'
     if (isHead) target = context.branch ?? target
-    if (!isHead && TAG_LIKE.test(target)) return `git push 推送疑似版本 tag ${target}`
+    if (!isHead && isTagLike(target)) return `git push 推送疑似版本 tag ${target}`
     if (isProtected(target, context.protectedBranches)) {
       return colon === 0 || isDelete ? `git push 删除受保护分支 ${target}` : `直接推送受保护分支 ${target}（等同绕过 PR 合并）`
     }

@@ -200,7 +200,7 @@ claude plugin test D:\Claude-auto-coding       # tests/*.test.ts
 - `tests/policy.test.ts`：边界放行/拒绝两侧 96 条用例
 - `tests/panel.test.ts`：边界栏按 policy 给出的拦截原因点亮合并 / tag / 发版 / 发布，12 条
 - `tests/loop.test.ts`：测试 hook 扮演引擎（git、fork、reviewer、prompt 提交、审计日志文件），覆盖完成、检查失败修复、revise 修复、continue、子 agent 过滤、暂停/恢复、Worker 回合进行中恢复会等该回合结束、暂停的回合还没记下时恢复会等它而 start 拒绝、残留的回合标记在 session.start / session.end / 底层 turn.complete 失败后被清掉、有回合在途时 start 等它结束、步骤仍在运行时 resume 不重跑、同一快照的几份步骤只跑一次、暂停时在途的 Worker 回合计数、你接管后发起的回合不计数但都更新最后回复、验收中按 Esc（prepend 层插件抢先结束派发）进入 paused 而非修复轮、发布回合按 Esc 进入 paused、API 错误等待中重载按剩余时间重试而 resume 立即重试、步骤里未预期的异常进入 paused、小于 1 的预算按 1、同一秒启动的两个任务各有审计日志、非 ASCII 及读不到的未跟踪文件仍列给 Reviewer、Review 被打断进入 paused、状态条在 terminal/desktop 上渲染且按钮可用、多行任务画成一行、面板在无任务/进行中/修复轮下的绘制（两个 surface × 宽窄两种宽度）、放不下阶段框时竖排、动画只在 working 时重绘且 tick 读状态时恢复不会让它停下、边界只在任务期间生效
-- 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配
+- 类型检查：加载过一次后引擎会写好 `.claude-plugin/types/` 和根目录 `tsconfig.json`（都已 gitignore），之后 `npx -p typescript tsc -p .`。工具类型表是本机的（Windows 只有 PowerShell、Linux 有 Bash），所以 shell 边界按名字正则匹配。worktree 里没有这两样（它们只出现在引擎加载插件的那个目录里），在 worktree 里做类型检查要先从主检出复制 `.claude-plugin/types/`；所以验收命令里只放 `validate` 和 `test`
 
 已在真实引擎（2.1.289，Windows）实测：
 

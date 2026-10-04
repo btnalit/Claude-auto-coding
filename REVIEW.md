@@ -205,6 +205,12 @@
 - **P3-19** `hooks/register.tsx`（`session.start` 重跑被打断的步骤）：热重载后 1 秒才重跑并计入 `stepsInFlight`；这 1 秒内的 `/supervise resume` 看到在途数为 0，会再起一份同样的步骤。seq 守卫会丢弃其中一份结果，但检查或 Reviewer 会多跑一次。可选：在排定定时器时就计入 `stepsInFlight`。
   - **状态：不修**——"检查或 Reviewer 会多跑一次"不成立：重载排定的那份和 resume 起的那份持有同一个快照，步骤的第一件事都是对快照 seq 的 `patch`，后到的那份在任何检查、fork 或 Reviewer 调用之前就被丢弃。探针（基线 `39c4467`，退避定时器、重载重跑、resume 三份同时排着）：决策、检查、Review 各只跑 1 次。回归测试「a resume while a reload's re-run is pending runs the step once」（`0bd4ae5`）。
 
+### 第三轮独立 Review 的备注（合并时处理）
+
+- **P3-9 的修复放宽过头，已收紧**：版本号判定一度不再接受 `.` 开头的后缀，`git push origin v1.2.3.Final` 这样推 tag 的命令被放行，触及"禁止发版"的硬边界。现在带任何后缀的版本号（`v1.2.3.Final`、`v2.0.0.RELEASE`、`1.2-rc1`）都算 tag，只有以 `.x` / `.*` 结尾的维护分支（`2.0.x`、`1.x`）不算（`hooks/policy.ts` 的 `TAG_LIKE` + `MAINTENANCE_BRANCH`）；两条拒绝、一条放行用例在合并提交上失败、修复后通过。
+- **P3-15 的 `createRef` 归类，已修**：`gh api graphql` 的 `createRef` 能写 tag ref，边界栏点亮 tag（修复前点亮"合并"）；用例同样在合并提交上失败。
+- **`turnWritten` 是单个模块级槽位，不修**：两个主循环 `turn.complete` 派发重叠时才会互相覆盖，主循环不会出现这种重叠。
+
 ## 验证
 
 | 命令 | 结果 |

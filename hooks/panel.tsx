@@ -188,7 +188,8 @@ export function railOf(denial: string): '合并' | 'tag' | '发版' | '发布' {
   const reason = (at === -1 ? denial : denial.slice(at + 3)).replace(/（[^）]*）/g, '').replace(/(受保护分支|tag) \S+/g, '$1')
   if (/发布制品/.test(reason)) return '发布'
   if (/release|发版/i.test(reason)) return '发版'
-  if (/\btags?\b|refs\/tags/.test(reason)) return 'tag'
+  // createRef writes a ref, a tag's included: the rail counts it with the tags.
+  if (/\btags?\b|refs\/tags|createRef/.test(reason)) return 'tag'
   return '合并'
 }
 

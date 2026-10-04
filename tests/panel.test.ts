@@ -19,6 +19,7 @@ describe('the rail lights the trigger the reason names, not a word in the comman
     ["gh api graphql -f query='mutation { createRelease(input: {repositoryId: \"R_1\", tagName: \"v1\"}) { clientMutationId } }'", undefined, '发版'],
     ['gh api repos/o/r/releases -f tag_name=v1', undefined, '发版'],
     ['gh api -X POST repos/o/r/git/tags -f tag=v1', undefined, 'tag'],
+    ["gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R_1\", name: \"refs/tags/v1\", oid: \"abc\"}) { clientMutationId } }'", undefined, 'tag'],
     ['gh release create v1.4.0', undefined, '发版'],
     ['git tag v1.4.0', undefined, 'tag'],
     ['git push origin tag release-final', undefined, 'tag'],
