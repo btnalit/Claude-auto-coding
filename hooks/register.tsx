@@ -391,7 +391,14 @@ async function stall($: Engine, origin: SuperviseTask, error: unknown): Promise<
 
 /** `signal` is the turn.complete dispatch's: it aborts when the person presses Esc during the steps. */
 async function onWorkerTurn($: Engine, task: SuperviseTask, end: TurnEnd, signal: AbortSignal): Promise<void> {
-  if (task.status === 'publishing') return finishPublish($, task)
+  if (task.status === 'publishing') {
+    // Esc hands the publishing turn to the person, as on any turn; however else it ended, the remote says how far it got.
+    if (end.reason === 'aborted') {
+      await patch($, task, { status: 'paused', note: '你中断了发布这一轮；/supervise resume 恢复自动监督' })
+      return
+    }
+    return finishPublish($, task)
+  }
   const turns = task.turns + 1
   await record($, 'worker', `第 ${turns} 轮结束${end.reason === 'answer' ? '' : `（${end.reason}）`}`, end.reason === 'answer' ? undefined : 'warn')
   if (end.reason === 'aborted') {

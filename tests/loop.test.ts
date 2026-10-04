@@ -479,6 +479,21 @@ test('a step that fails unexpectedly pauses the task instead of leaving it decid
   expect(status).toContain('/supervise resume 重试')
 })
 
+test('Esc during the publishing turn pauses the task instead of ending it', { options: { publish: 'push' } }, async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, 'done')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('发布中')
+  expect(w.submitted.at(-1)).toContain('把当前分支推到 origin')
+
+  await endTurn($, 'half way through the push', { reason: 'aborted' })
+  await w.clock.settle()
+  const status = await supervise($, 'status')
+  expect(status).toContain('已暂停')
+  expect(status).toContain('你中断了发布这一轮')
+})
+
 test('a review cut short pauses the task instead of parking it', async ($, on) => {
   const w = world(on, { isReviewAborted: true })
   await startTask($, w, 'start add a login page')
