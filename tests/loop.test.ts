@@ -428,6 +428,42 @@ test('the panel animates only while the task is working', async ($, on) => {
   expect(redraws).toBe(settled)
 })
 
+test('a resume while a tick reads the pause keeps the panel moving', async ($, on) => {
+  // Holds the next read of the task once it has read it, so the test can act between the read and its use.
+  let isNextReadHeld = false
+  let releaseRead = () => {}
+  on('state.get', async ($, e, next) => {
+    const value = await next(e)
+    if (isNextReadHeld && e.plugin === 'auto-coding' && e.key === 'task') {
+      isNextReadHeld = false
+      await new Promise<void>(resolve => {
+        releaseRead = resolve
+      })
+    }
+    return value
+  })
+  const w = world(on)
+  let redraws = 0
+  on('ui.invalidate', () => {
+    redraws += 1
+    return { value: undefined }
+  })
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  isNextReadHeld = true
+  await w.clock.advance(200)
+  // The tick has read `paused`; the resume finds its ticker still there before the tick stops it.
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+  releaseRead()
+  await w.clock.settle()
+  const settled = redraws
+  await w.clock.advance(1_000)
+  expect(redraws).toBeGreaterThan(settled)
+})
+
 test('a review cut short pauses the task instead of parking it', async ($, on) => {
   const w = world(on, { isReviewAborted: true })
   await startTask($, w, 'start add a login page')

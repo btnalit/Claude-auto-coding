@@ -313,6 +313,9 @@ async function tick($: Engine): Promise<void> {
   if (task === null || !isWorking(task.status)) {
     ticker?.cancel()
     ticker = undefined
+    // A resume while the read above was on its way found this ticker still running and left the motion to it.
+    const now = await read($, TASK)
+    if (now !== null && isWorking(now.status)) animate($)
   }
   $.ui.invalidate('ui.render')
 }
