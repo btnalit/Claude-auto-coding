@@ -30,6 +30,9 @@ describe('allowed: push, PR and ordinary work', () => {
     ["gh api graphql -f query='query { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }'", onFeature],
     ['gh -R o/r pr view 3', onFeature],
     ["git commit -F - <<'EOF'\nchore: notes\ngit push origin main\nEOF", onMain],
+    ["git commit -m @'\nrelease: git merge main\n'@", onMain],
+    ["@'\ngit push origin main\n'@ | Set-Content notes.md", onFeature],
+    ["gh api graphql -F query=@- <<'EOF'\nquery { repository(owner: \"o\", name: \"r\") { pullRequest(number: 3) { mergeable } } }\nEOF", onFeature],
   ]
   for (const [command, context] of allowed) {
     test(`allows: ${command.split('\n')[0]}`, () => {
@@ -83,6 +86,10 @@ describe('denied: merge into a protected branch, tags and releases', () => {
     ['git push origin tag rc-final', onFeature],
     ["bash -s <<'EOF'\ngit push origin main\nEOF", onFeature],
     ["cat <<'EOF' | bash\ngit push --tags\nEOF", onFeature],
+    ["@'\ngit push origin main\n'@ | Invoke-Expression", onFeature],
+    ['Invoke-Expression @"\ngit push --tags\n"@', onFeature],
+    ["@'\ngit tag v1.4.0\n'@ | iex", onFeature],
+    ["gh api graphql -F query=@- <<'EOF'\nmutation { mergePullRequest(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }\nEOF", onFeature],
   ]
   for (const [command, context] of denied) {
     test(`denies: ${command.split('\n')[0]}`, () => {

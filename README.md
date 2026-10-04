@@ -165,7 +165,7 @@ turns [2/40]  repair [1/3]  checks [1/2]  review [—]  boundary [1]   [暂停] 
 
 **放行**：推功能分支（含 `--force-with-lease`）、`gh pr create/view/checks`、在功能分支上 merge/rebase main、在 main 上 `git pull`，以及一切本地开发操作（编辑、测试、提交）。
 
-**它是词法的、尽力而为的**：按命令文本判断，引号内的 `sh -c '…'`、管道、`&&`、heredoc 喂给 shell 都会被读到；提交信息、`--body`、喂给 `cat` 的 heredoc 被当作数据，不会误伤。但脚本文件里的命令、别名、变量拼接、`gh workflow run` 触发的发版流水线都在它视野之外。**真正的保证应放在系统边界上**：GitHub 分支保护（main 要求 PR + review）、发布凭据（npm token 等）不进 Worker 的环境。mod 的边界是第二道防线和审计点，每次拦截都记入日志并作为证据交给 Reviewer。
+**它是词法的、尽力而为的**：按命令文本判断，引号内的 `sh -c '…'`、管道、`&&`、heredoc 喂给 shell、PowerShell here-string 交给 `Invoke-Expression`/`iex`/`pwsh`、`gh api graphql` 的 heredoc 正文都会被读到；提交信息、`--body`、喂给 `cat` 的 heredoc 被当作数据，不会误伤。但脚本文件里的命令、别名、变量拼接、`gh workflow run` 触发的发版流水线都在它视野之外。**真正的保证应放在系统边界上**：GitHub 分支保护（main 要求 PR + review）、发布凭据（npm token 等）不进 Worker 的环境。mod 的边界是第二道防线和审计点，每次拦截都记入日志并作为证据交给 Reviewer。
 
 `.git` 写入、删除底线这些本地防护不由 mod 拦截，交给 Claude Code 自己的权限模式。
 

@@ -15,7 +15,8 @@ const SEPARATORS = /&&|\|\||\$\(|[;&|\n\r(){}`]/
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec'])
 const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
+const GRAPHQL = /\bgh\b.*\bgraphql\b/
 const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
 
 const PUBLISHERS: Record<string, (words: string[]) => boolean> = {
@@ -64,13 +65,18 @@ export function isProtected(name: string | undefined, protectedBranches: readonl
 }
 
 /**
- * Drops text that is data, not commands: a heredoc body fed to anything but a
- * shell, a PowerShell here-string, and a quoted message, title or body.
+ * Drops text that is data, not commands: a heredoc body or a PowerShell
+ * here-string fed to anything but a shell, and a quoted message, title or body.
+ * A `gh api graphql` heredoc stays, for the mutation it names.
  */
 export function stripData(command: string): string {
   const kept: string[] = []
   let terminator: string | undefined
-  for (const line of command.replace(/@(['"])\r?\n[\s\S]*?\r?\n\1@/g, ' ').split('\n')) {
+  // A here-string a shell runs is commands too: `@'…'@ | Invoke-Expression`, `iex @'…'@`.
+  const hereStrings = command.replace(/@(['"])\r?\n[\s\S]*?\r?\n\1@/g, (body: string, _quote: string, at: number) =>
+    isRunByShell(lineAround(command, at, at + body.length)) ? body : ' ',
+  )
+  for (const line of hereStrings.split('\n')) {
     if (terminator !== undefined) {
       if (line.trim() === terminator) terminator = undefined
       continue
@@ -78,7 +84,7 @@ export function stripData(command: string): string {
     kept.push(line)
     const heredoc = /<<-?\s*(['"]?)(\w+)\1/.exec(line)
     // A body a shell reads is commands wherever the shell sits on the line: `bash -s <<EOF`, `cat <<EOF | bash`.
-    if (heredoc !== null && !line.split(/[\s|'"]+/).some(word => SHELLS.has(programOf(word)))) terminator = heredoc[2]
+    if (heredoc !== null && !isRunByShell(line) && !GRAPHQL.test(line)) terminator = heredoc[2]
   }
   return kept
     .join('\n')
@@ -92,6 +98,17 @@ export function segments(command: string): string[][] {
     .split(SEPARATORS)
     .map(part => part.trim().split(/\s+/).filter(Boolean))
     .filter(words => words.length > 0)
+}
+
+function isRunByShell(line: string): boolean {
+  return line.split(/[\s|'";&()]+/).some(word => SHELLS.has(programOf(word)))
+}
+
+/** What surrounds `text.slice(start, end)` on its first and last lines. */
+function lineAround(text: string, start: number, end: number): string {
+  const from = text.lastIndexOf('\n', start - 1) + 1
+  const to = text.indexOf('\n', end)
+  return `${text.slice(from, start)} ${text.slice(end, to === -1 ? undefined : to)}`
 }
 
 function programOf(token: string): string {
