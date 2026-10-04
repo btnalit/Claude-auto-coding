@@ -15,6 +15,7 @@ const SEPARATORS = /&&|\|\||\$\(|[;&|\n\r(){}`]/
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'])
 const PUSH_OPTIONS_WITH_VALUE = new Set(['-o', '--push-option', '--repo', '--receive-pack', '--exec'])
 const GH_OPTIONS_WITH_VALUE = new Set(['-R', '--repo'])
+const REBASE_OPTIONS_WITH_VALUE = new Set(['--onto', '-s', '--strategy', '-X', '--strategy-option', '-x', '--exec'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'pwsh', 'powershell', 'iex', 'invoke-expression'])
 const GRAPHQL = /\bgh\b.*\bgraphql\b/
 const TAG_LIKE = /^v?\d+(\.\d+)+([-+.].*)?$/
@@ -163,7 +164,9 @@ function checkGit(args: string[], context: BoundaryContext): string | undefined 
   if (sub === 'rebase') {
     if (flags.some(f => ['--abort', '--continue', '--skip', '--quit', '--edit-todo'].includes(f))) return undefined
     if (onProtected) return `在受保护分支 ${context.branch} 上 git rebase`
-    return isProtected(words[1], context.protectedBranches) ? `git rebase 改写受保护分支 ${words[1]}` : undefined
+    // `--onto <newbase>`, a strategy and `--exec` take a value: what is left is `<upstream> [<branch>]`.
+    const [, rewritten] = rest.filter((a, i) => !a.startsWith('-') && !REBASE_OPTIONS_WITH_VALUE.has(rest[i - 1] ?? ''))
+    return isProtected(rewritten, context.protectedBranches) ? `git rebase 改写受保护分支 ${rewritten}` : undefined
   }
   if (sub === 'push') return checkPush(rest, context)
   if (sub === 'tag') {
