@@ -586,6 +586,20 @@ test('a resume while an API error is waited out retries now, once', async ($, on
   expect(await supervise($, 'status')).toContain('Worker 工作中')
 })
 
+test("a resume while a reload's re-run is pending runs the step once", async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await endTurn($, '', { reason: 'error' })
+  await w.clock.settle()
+  // Three copies of one step from one snapshot: the backoff's, the reload's and the resume's.
+  await $.session.start({ cwd: 'D:/repo', surface: 'terminal', isInteractive: true })
+  await supervise($, 'resume')
+  await w.clock.advance(31_000)
+  expect(w.submitted.filter(text => text.includes(RETRY))).toHaveLength(1)
+  expect(w.forks).toHaveLength(0)
+  expect(await supervise($, 'status')).toContain('Worker 工作中')
+})
+
 test('a review cut short pauses the task instead of parking it', async ($, on) => {
   const w = world(on, { isReviewAborted: true })
   await startTask($, w, 'start add a login page')
