@@ -152,22 +152,28 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     // A subagent's turn is the Worker's own business, not a Worker turn.
     if (e.agentId !== undefined) return next(e)
-    // The turn has ended whatever happens beneath: a failure there must not leave it marked in flight.
-    await update($, WORKER_TURN, () => null)
-    const result = await next(e)
-    const task = await read($, TASK)
-    if (task === null) return result
     const end: TurnEnd = {
       reason: e.reason,
       answer: e.answer,
       turnId: e.turnId,
       refusal: e.reason === 'refusal' ? (e.refusal.explanation ?? e.refusal.category ?? undefined) : undefined,
     }
-    if (task.status === 'paused') {
-      await notePausedTurn($, task, end)
-      return result
+    // From the marker's drop until a paused task has this turn written down, a resume waits: deciding
+    // sooner would read the turn before it and leave this one uncounted.
+    const written = writing()
+    let result: Awaited<ReturnType<typeof next>>
+    let ended: SuperviseTask | null
+    try {
+      // The turn has ended whatever happens beneath: a failure there must not leave it marked in flight.
+      await update($, WORKER_TURN, () => null)
+      result = await next(e)
+      ended = await read($, TASK)
+      if (ended !== null && ended.status === 'paused') await notePausedTurn($, ended, end)
+    } finally {
+      written()
     }
-    if (task.status !== 'running' && task.status !== 'publishing') return result
+    const task = ended
+    if (task === null || (task.status !== 'running' && task.status !== 'publishing')) return result
     // The step runs inside this dispatch: the session stays busy until the next
     // Worker turn is queued, so a headless run does not exit half way.
     try {
@@ -366,6 +372,18 @@ function log($: Engine, task: SuperviseTask, type: string, detail?: unknown): Pr
 // or reviewing task a reload cut off is told from one whose step is still at work.
 let stepsInFlight = 0
 
+// Settles once the main loop's latest turn end is written down. A reload starts it settled.
+let turnWritten: Promise<void> = Promise.resolve()
+
+/** Marks a turn end as being written down; the function it returns says it is. */
+function writing(): () => void {
+  let done = () => {}
+  turnWritten = new Promise<void>(resolve => {
+    done = resolve
+  })
+  return done
+}
+
 /** Runs a step of `task`'s loop, counted while it runs; one that fails unexpectedly leaves the task paused. */
 async function inFlight($: Engine, task: SuperviseTask, step: () => Promise<void>): Promise<void> {
   stepsInFlight += 1
@@ -452,6 +470,8 @@ async function resumeStep($: Engine, task: SuperviseTask): Promise<void> {
     await send($, task, 'running', '上一轮因 API 错误中断。从中断处继续完成任务。')
     return
   }
+  // A turn whose end is still being written down is read once it is (no transition, so `task`'s seq still holds).
+  if (task.status === 'paused') await turnWritten
   // The turn in flight decides at its own turn.complete; deciding now would read half a turn and queue a second.
   if (task.status === 'paused' && (await read($, WORKER_TURN)) !== null) {
     await patch($, task, { status: 'running', note: '已恢复：等 Worker 这一轮结束后再决策' })

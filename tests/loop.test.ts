@@ -13,6 +13,8 @@ const PASS = '{"verdict":"pass","summary":"task accomplished","findings":[]}'
 const VERIFY = '{"action":"verify","reason":"the worker reports done"}'
 /** An answer whose turn.complete fails beneath the mod. */
 const CORE_FAILS = 'core fails'
+/** An answer whose turn.complete beneath the mod finishes only once the test releases it. */
+const CORE_HELD = 'core held'
 
 type Replies = {
   decision?: string
@@ -89,8 +91,13 @@ function world(on: On, replies: Replies = {}) {
     return { text: e.text }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
-  on('turn.complete', ($, e) => {
+  let releaseEnd = () => {}
+  const endReleased = new Promise<void>(resolve => {
+    releaseEnd = resolve
+  })
+  on('turn.complete', async ($, e) => {
     if (e.answer === CORE_FAILS) throw new Error('turn.complete failed beneath the mod')
+    if (e.answer === CORE_HELD) await endReleased
     return { text: e.answer }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -101,7 +108,7 @@ function world(on: On, replies: Replies = {}) {
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  return { clock, submitted, argvs, forks, reviews, files, releaseFork, releaseCheck }
+  return { clock, submitted, argvs, forks, reviews, files, releaseFork, releaseCheck, releaseEnd }
 }
 
 function supervise($: Engine, args: string): Promise<string> {
@@ -268,6 +275,27 @@ test('a turn the person starts while paused does not count, but its reply is sti
   await supervise($, 'resume')
   await w.clock.settle()
   expect(w.forks.at(-1)).toContain('what the person got')
+})
+
+test('a resume while a paused turn is still ending decides on that turn', async ($, on) => {
+  const w = world(on)
+  await startTask($, w, 'start refactor')
+  await $.turn.start({ text: w.submitted[0] ?? '', turnId: 'turn-1' })
+  await supervise($, 'pause')
+  // The turn has ended and dropped its marker; the engine beneath is still taking its end.
+  const ending = endTurn($, CORE_HELD)
+  await w.clock.settle()
+  await supervise($, 'resume')
+  await w.clock.settle()
+  expect(w.forks).toHaveLength(0)
+
+  w.releaseEnd()
+  await ending
+  await w.clock.settle()
+  expect(w.forks.at(-1)).toContain(CORE_HELD)
+  const status = await supervise($, 'status')
+  expect(status).toContain('已完成')
+  expect(status).toContain('轮次 1/40')
 })
 
 /** Pauses and resumes the task, and says whether the resume waited for a turn in flight. */
